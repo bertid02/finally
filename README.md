@@ -1,60 +1,59 @@
 # FinAlly — AI Trading Workstation
 
-A visually stunning AI-powered trading workstation that streams live market data, simulates portfolio trading, and integrates an LLM chat assistant that can analyze positions and execute trades via natural language.
+A dark, data-dense trading terminal with live streaming prices, a simulated $10k portfolio, and an LLM copilot that can analyze positions and execute trades from natural language.
 
-Built entirely by coding agents as a capstone project for an agentic AI coding course.
+Built entirely by coding agents as the capstone for an agentic AI coding course. The full specification lives in [`planning/PLAN.md`](planning/PLAN.md).
 
-## Features
+## Status
 
-- **Live price streaming** via SSE with green/red flash animations
-- **Simulated portfolio** — $10k virtual cash, market orders, instant fills
-- **Portfolio visualizations** — heatmap (treemap), P&L chart, positions table
-- **AI chat assistant** — analyzes holdings, suggests and auto-executes trades
-- **Watchlist management** — track tickers manually or via AI
-- **Dark terminal aesthetic** — Bloomberg-inspired, data-dense layout
+The market data subsystem is complete ([summary](planning/MARKET_DATA_SUMMARY.md)). The rest — portfolio, chat, frontend, Docker — is still to be built.
+
+| Component | State |
+|---|---|
+| `backend/app/market/` — simulator, Massive client, price cache, SSE stream | ✅ built, 73 tests |
+| Portfolio & watchlist API, SQLite persistence | ⬜ planned |
+| LLM chat integration | ⬜ planned |
+| Next.js frontend | ⬜ planned |
+| Dockerfile, start/stop scripts, E2E tests | ⬜ planned |
 
 ## Architecture
 
-Single Docker container serving everything on port 8000:
+One container, one port (8000). FastAPI serves the REST API, the SSE price stream, and the statically exported Next.js frontend.
 
-- **Frontend**: Next.js (static export) with TypeScript and Tailwind CSS
-- **Backend**: FastAPI (Python/uv) with SSE streaming
-- **Database**: SQLite with lazy initialization
-- **AI**: LiteLLM → OpenRouter (Cerebras inference) with structured outputs
-- **Market data**: Built-in GBM simulator (default) or Massive API (optional)
+- **Frontend** — Next.js + TypeScript + Tailwind, built as a static export
+- **Backend** — FastAPI, managed with `uv`
+- **Database** — SQLite at `db/finally.db`, lazily initialized and seeded
+- **Real-time** — Server-Sent Events, one event per tick carrying every ticker
+- **AI** — LiteLLM → OpenRouter (`openai/gpt-oss-120b` on Cerebras) with structured outputs
+- **Market data** — GBM simulator by default; Massive (Polygon.io) REST polling when a key is present
 
-## Quick Start
+## Running the backend
 
 ```bash
-# Clone and configure
-cp .env.example .env
-# Add your OPENROUTER_API_KEY to .env
-
-# Run with Docker
-docker build -t finally .
-docker run -v finally-data:/app/db -p 8000:8000 --env-file .env finally
-
-# Open http://localhost:8000
+cd backend
+uv sync --dev
+uv run pytest                    # 73 tests
+uv run python market_data_demo.py  # live simulator in the terminal
 ```
 
-## Environment Variables
+## Environment
 
-| Variable | Required | Description |
-|---|---|---|
-| `OPENROUTER_API_KEY` | Yes | OpenRouter API key for AI chat |
-| `MASSIVE_API_KEY` | No | Massive (Polygon.io) key for real market data; omit to use simulator |
-| `LLM_MOCK` | No | Set `true` for deterministic mock LLM responses (testing) |
+Create `.env` in the project root:
 
-## Project Structure
+```bash
+OPENROUTER_API_KEY=   # required for AI chat
+MASSIVE_API_KEY=      # optional; omit to use the built-in simulator
+LLM_MOCK=false        # true for deterministic mock LLM responses in tests
+```
+
+## Layout
 
 ```
-finally/
-├── frontend/    # Next.js static export
-├── backend/     # FastAPI uv project
-├── planning/    # Project documentation and agent contracts
-├── test/        # Playwright E2E tests
-├── db/          # SQLite volume mount (runtime)
-└── scripts/     # Start/stop helpers
+backend/    FastAPI uv project (app/market/ is complete)
+planning/   PLAN.md — the shared contract all agents work from
+frontend/   Next.js static export (not yet created)
+test/       Playwright E2E tests (not yet created)
+db/         SQLite volume mount at runtime
 ```
 
 ## License
