@@ -101,3 +101,29 @@ class TestPriceCache:
         cache = PriceCache()
         update = cache.update("AAPL", 190.12345)
         assert update.price == 190.12
+
+    def test_session_open_defaults_to_first_price(self):
+        """Test that session_open anchors to the first observed price when omitted."""
+        cache = PriceCache()
+        update = cache.update("AAPL", 190.00)
+        assert update.session_open == 190.00
+
+    def test_session_open_explicit_on_first_update(self):
+        """Test that an explicit session_open is used on first observation."""
+        cache = PriceCache()
+        update = cache.update("AAPL", 190.00, session_open=185.00)
+        assert update.session_open == 185.00
+
+    def test_session_open_preserved_across_updates(self):
+        """Test that session_open stays fixed once a ticker is tracked."""
+        cache = PriceCache()
+        cache.update("AAPL", 190.00)
+        update = cache.update("AAPL", 195.00)
+        assert update.session_open == 190.00
+
+    def test_session_open_ignores_later_explicit_values(self):
+        """Test that a later explicit session_open does not override the anchor."""
+        cache = PriceCache()
+        cache.update("AAPL", 190.00, session_open=185.00)
+        update = cache.update("AAPL", 195.00, session_open=999.00)
+        assert update.session_open == 185.00

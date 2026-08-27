@@ -55,3 +55,13 @@ class MarketDataSource(ABC):
     @abstractmethod
     def get_tickers(self) -> list[str]:
         """Return the current list of actively tracked tickers."""
+
+    @abstractmethod
+    async def supports_ticker(self, ticker: str) -> bool:
+        """Check whether this source can provide data for a ticker.
+
+        Called by POST /api/watchlist before inserting a new ticker — behavior
+        differs per source: the simulator accepts any well-formed symbol and
+        invents a synthetic price for unknown ones, while Massive can only
+        confirm a symbol by finding it in a live snapshot fetch.
+        """

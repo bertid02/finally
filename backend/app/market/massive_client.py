@@ -78,6 +78,24 @@ class MassiveDataSource(MarketDataSource):
     def get_tickers(self) -> list[str]:
         return list(self._tickers)
 
+    async def supports_ticker(self, ticker: str) -> bool:
+        """True only if the symbol appears in a live snapshot fetch.
+
+        Unlike the simulator, Massive can't invent data for an unknown
+        symbol — a snapshot request for a bad ticker just returns nothing.
+        """
+        ticker = ticker.upper().strip()
+        if not self._client:
+            return False
+
+        try:
+            snapshots = await asyncio.to_thread(self._fetch_snapshots, [ticker])
+        except Exception as e:
+            logger.warning("supports_ticker check failed for %s: %s", ticker, e)
+            return False
+
+        return any(getattr(snap, "ticker", None) == ticker for snap in snapshots)
+
     # --- Internal ---
 
     async def _poll_loop(self) -> None:
@@ -101,10 +119,13 @@ class MassiveDataSource(MarketDataSource):
                     price = snap.last_trade.price
                     # Massive timestamps are Unix milliseconds → convert to seconds
                     timestamp = snap.last_trade.timestamp / 1000.0
+                    day = getattr(snap, "day", None)
+                    session_open = getattr(day, "open", None) if day is not None else None
                     self._cache.update(
                         ticker=snap.ticker,
                         price=price,
                         timestamp=timestamp,
+                        session_open=session_open,
                     )
                     processed += 1
                 except (AttributeError, TypeError) as e:
@@ -120,9 +141,9 @@ class MassiveDataSource(MarketDataSource):
             # Don't re-raise — the loop will retry on the next interval.
             # Common failures: 401 (bad key), 429 (rate limit), network errors.
 
-    def _fetch_snapshots(self) -> list:
+    def _fetch_snapshots(self, tickers: list[str] | None = None) -> list:
         """Synchronous call to the Massive REST API. Runs in a thread."""
         return self._client.get_snapshot_all(
             market_type=SnapshotMarketType.STOCKS,
-            tickers=self._tickers,
+            tickers=tickers if tickers is not None else self._tickers,
         )
