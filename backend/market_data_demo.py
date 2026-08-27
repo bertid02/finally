@@ -20,7 +20,6 @@ from rich.table import Table
 from rich.text import Text
 
 from app.market.cache import PriceCache
-from app.market.seed_prices import SEED_PRICES
 from app.market.simulator import SimulatorDataSource
 
 # Sparkline characters, low to high
@@ -91,7 +90,8 @@ def build_table(
 
         price_str = f"[{color}]${format_price(update.price)}[/]"
         change_str = f"[{color}]{update.change:+.2f}[/]"
-        pct_str = f"[{color}]{update.change_percent:+.2f}%[/]"
+        # The displayed daily change is versus session open, never tick-over-tick.
+        pct_str = f"[{color}]{update.change_percent_session:+.2f}%[/]"
 
         # Sparkline from history
         vals = list(history.get(ticker, []))
@@ -179,12 +179,12 @@ def print_summary(cache: PriceCache) -> None:
     table.add_column("Session Change", justify="right", width=14)
 
     for ticker in TICKERS:
-        seed = SEED_PRICES.get(ticker, 0)
         update = cache.get(ticker)
         if update is None:
             continue
+        seed = update.session_open
         final = update.price
-        session_change = ((final - seed) / seed) * 100 if seed else 0
+        session_change = update.change_percent_session
 
         if session_change > 0:
             color = "green"

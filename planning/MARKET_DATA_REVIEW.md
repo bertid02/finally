@@ -6,6 +6,56 @@
 
 ---
 
+## Resolution
+
+> **All findings in this document were fixed on 2026-08-27.** The review text below is
+> preserved as written, as the record of what was wrong and why. Current state:
+> **193 tests passing, 100% statement coverage of `app/`**, `ruff check` and
+> `ruff format --check` both clean, no warnings.
+
+| ID | Finding | Resolution |
+|---|---|---|
+| C1 | Massive path never wrote to the cache | `resolve_price()` fallback chain + `_safe_timestamp()` (nanoseconds, with a ±7-day sanity guard) |
+| C2 | `MagicMock` fixtures hid C1 | All Massive fixtures rebuilt on real SDK dataclasses (`LastTrade`, `Agg`, `MinuteSnapshot`, `TickerSnapshot`) |
+| C3 | Test enshrined dropping `last_trade=None` | Replaced with `test_starter_plan_snapshot_still_produces_a_price` |
+| H1 | `session_open` / `supports_ticker` absent | Added to `PriceUpdate`, `PriceCache`, the ABC, and both sources |
+| H2 | Module-level router double-registered | `APIRouter` now constructed inside `create_stream_router()` |
+| H3 | Sources disagreed on normalisation | Shared `normalize_ticker()` on the interface, used by both |
+| H4 | No SSE tests | New `test_stream.py` — 19 tests, `stream.py` at 100% |
+| M1 | `stop()` didn't stop the simulator | `stop()` clears `_sim`; asserted by `test_no_writes_after_stop` |
+| M2 | Second `start()` orphaned a task | Both sources raise `RuntimeError` |
+| M3 | Ticker list read from a worker thread | `_poll_once` snapshots the list before the `to_thread` hop |
+| M4 | `RESTClient` never closed | `_close_client()` on `stop()` and on a fatal `start()` |
+| M5 | No SSE keep-alive | `: keepalive` comment after 15s idle |
+| M6 | `rich` was a production dependency | Moved to the `dev` extra |
+| L1 | `version` read outside the lock | Now takes the lock |
+| L2 | `timestamp or time.time()` ate an explicit `0.0` | Changed to `is not None` |
+| L3 | Unseedable RNGs | `seed=` parameter injects both `numpy` and stdlib generators |
+| L4 | Misnamed placeholder tests | Replaced with tests that inject a failing step and assert real behaviour |
+| L5 | GBM math untested | Realized sigma, pairwise correlation, and the Itō drift correction asserted over 60k steps |
+| L6 | No `.env.example` | Created at the repo root |
+| L7 | `massive` unconditionally imported | Left as-is — a deliberate prior decision, noted in the summary |
+| L8 | Raw exception text in logs | Reviewed: Polygon authenticates by header, no key in the message |
+| L9 | Stale `MARKET_DATA_SUMMARY.md` | Rewritten against the current state |
+
+Three fixes went beyond the original findings, each surfaced while implementing the above:
+
+- **`PriceCache.remove()` did not bump the version**, so removing the last ticker left the SSE
+  stream believing nothing had changed and the browser kept showing a ticker the backend had
+  forgotten. Flagged in `MARKET_INTERFACE.md` §4; now fixed and covered.
+- **The SSE generator swallowed `CancelledError`**, so a cancelled stream task looked like it
+  had completed normally, breaking cooperative shutdown. It now logs and re-raises.
+- **`_rebuild_cholesky` had no guard**, so a non-positive-definite correlation matrix would
+  raise out of `add_ticker` and take down the feed. It now falls back to uncorrelated moves.
+
+One thing worth knowing for the endpoint tests: neither `httpx.ASGITransport` nor Starlette's
+`TestClient` can consume an endless SSE body — both buffer the whole response before
+returning, so they deadlock on a stream that never ends. The endpoint tests therefore call the
+route handler and drain its `StreamingResponse.body_iterator` directly, which exercises the
+same code path without a transport.
+
+---
+
 ## Verdict
 
 **The simulator path is production-quality. The Massive path is non-functional and its tests do not detect that.**
