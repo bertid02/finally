@@ -8,13 +8,17 @@ from app.market.cache import PriceCache
 from app.market.massive_client import MassiveDataSource
 
 
-def _make_snapshot(ticker: str, price: float, timestamp_ms: int) -> MagicMock:
+def _make_snapshot(
+    ticker: str, price: float, timestamp_ms: int, day_open: float | None = None
+) -> MagicMock:
     """Create a mock Massive snapshot object."""
     snap = MagicMock()
     snap.ticker = ticker
     snap.last_trade = MagicMock()
     snap.last_trade.price = price
     snap.last_trade.timestamp = timestamp_ms
+    snap.day = MagicMock()
+    snap.day.open = day_open if day_open is not None else price
     return snap
 
 
@@ -183,6 +187,86 @@ class TestMassiveDataSource:
         # Stop and verify task is cancelled
         await source.stop()
         assert source._task is None
+
+    async def test_session_open_from_day_open(self):
+        """Test that session_open is populated from the snapshot's day.open."""
+        cache = PriceCache()
+        source = MassiveDataSource(api_key="test-key", price_cache=cache, poll_interval=60.0)
+        source._tickers = ["AAPL"]
+        source._client = MagicMock()
+
+        mock_snapshots = [_make_snapshot("AAPL", 190.50, 1707580800000, day_open=185.00)]
+
+        with patch.object(source, "_fetch_snapshots", return_value=mock_snapshots):
+            await source._poll_once()
+
+        update = cache.get("AAPL")
+        assert update.session_open == 185.00
+
+    async def test_session_open_missing_day_falls_back_to_price(self):
+        """Test that a snapshot with no day info anchors session_open to the price."""
+        cache = PriceCache()
+        source = MassiveDataSource(api_key="test-key", price_cache=cache, poll_interval=60.0)
+        source._tickers = ["AAPL"]
+        source._client = MagicMock()
+
+        snap = MagicMock()
+        snap.ticker = "AAPL"
+        snap.last_trade = MagicMock(price=190.50, timestamp=1707580800000)
+        snap.day = None
+
+        with patch.object(source, "_fetch_snapshots", return_value=[snap]):
+            await source._poll_once()
+
+        update = cache.get("AAPL")
+        assert update.session_open == 190.50
+
+    async def test_supports_ticker_true_when_present_in_snapshot(self):
+        """Test supports_ticker returns True when the symbol is in the response."""
+        cache = PriceCache()
+        source = MassiveDataSource(api_key="test-key", price_cache=cache)
+        source._client = MagicMock()
+
+        with patch.object(
+            source, "_fetch_snapshots", return_value=[_make_snapshot("AAPL", 190.50, 1707580800000)]
+        ):
+            assert await source.supports_ticker("AAPL") is True
+
+    async def test_supports_ticker_false_when_absent_from_snapshot(self):
+        """Test supports_ticker returns False for an unknown symbol."""
+        cache = PriceCache()
+        source = MassiveDataSource(api_key="test-key", price_cache=cache)
+        source._client = MagicMock()
+
+        with patch.object(source, "_fetch_snapshots", return_value=[]):
+            assert await source.supports_ticker("BANANA") is False
+
+    async def test_supports_ticker_false_without_client(self):
+        """Test supports_ticker returns False when the source hasn't started."""
+        cache = PriceCache()
+        source = MassiveDataSource(api_key="test-key", price_cache=cache)
+
+        assert await source.supports_ticker("AAPL") is False
+
+    async def test_supports_ticker_false_on_fetch_error(self):
+        """Test supports_ticker returns False rather than raising on API errors."""
+        cache = PriceCache()
+        source = MassiveDataSource(api_key="test-key", price_cache=cache)
+        source._client = MagicMock()
+
+        with patch.object(source, "_fetch_snapshots", side_effect=Exception("network error")):
+            assert await source.supports_ticker("AAPL") is False
+
+    async def test_supports_ticker_normalizes_case(self):
+        """Test supports_ticker uppercases before comparing."""
+        cache = PriceCache()
+        source = MassiveDataSource(api_key="test-key", price_cache=cache)
+        source._client = MagicMock()
+
+        with patch.object(
+            source, "_fetch_snapshots", return_value=[_make_snapshot("AAPL", 190.50, 1707580800000)]
+        ):
+            assert await source.supports_ticker("aapl") is True
 
     async def test_start_immediate_poll(self):
         """Test that start() does an immediate poll before starting the loop."""

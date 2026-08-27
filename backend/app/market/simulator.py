@@ -6,6 +6,7 @@ import asyncio
 import logging
 import math
 import random
+import re
 
 import numpy as np
 
@@ -23,6 +24,9 @@ from .seed_prices import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Matches the same well-formed-symbol rule as POST /api/watchlist (PLAN.md §8)
+TICKER_RE = re.compile(r"^[A-Z]{1,5}$")
 
 
 class GBMSimulator:
@@ -256,6 +260,11 @@ class SimulatorDataSource(MarketDataSource):
 
     def get_tickers(self) -> list[str]:
         return self._sim.get_tickers() if self._sim else []
+
+    async def supports_ticker(self, ticker: str) -> bool:
+        """Any well-formed symbol is accepted — unknown ones get DEFAULT_PARAMS
+        and a synthetic seed price (see GBMSimulator._add_ticker_internal)."""
+        return bool(TICKER_RE.match(ticker.upper().strip()))
 
     async def _run_loop(self) -> None:
         """Core loop: step the simulation, write to cache, sleep."""

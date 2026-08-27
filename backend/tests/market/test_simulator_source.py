@@ -124,6 +124,31 @@ class TestSimulatorDataSource:
 
         await source.stop()
 
+    async def test_supports_ticker_accepts_well_formed_symbol(self):
+        """Test supports_ticker accepts any well-formed symbol, known or not."""
+        cache = PriceCache()
+        source = SimulatorDataSource(price_cache=cache, update_interval=0.1)
+
+        assert await source.supports_ticker("AAPL") is True
+        assert await source.supports_ticker("BANANA") is True  # unknown, still well-formed
+
+    async def test_supports_ticker_normalizes_case_and_whitespace(self):
+        """Test supports_ticker normalizes input before validating."""
+        cache = PriceCache()
+        source = SimulatorDataSource(price_cache=cache, update_interval=0.1)
+
+        assert await source.supports_ticker("aapl") is True
+        assert await source.supports_ticker("  aapl  ") is True
+
+    async def test_supports_ticker_rejects_malformed_symbol(self):
+        """Test supports_ticker rejects symbols that don't match the ticker format."""
+        cache = PriceCache()
+        source = SimulatorDataSource(price_cache=cache, update_interval=0.1)
+
+        assert await source.supports_ticker("") is False
+        assert await source.supports_ticker("TOOLONG1") is False
+        assert await source.supports_ticker("AB12") is False
+
     async def test_custom_event_probability(self):
         """Test creating source with custom event probability."""
         cache = PriceCache()
