@@ -5,6 +5,7 @@ from unittest.mock import patch
 
 from app.market.cache import PriceCache
 from app.market.factory import create_market_data_source
+from app.market.interface import MarketDataSource
 from app.market.massive_client import MassiveDataSource
 from app.market.simulator import SimulatorDataSource
 
@@ -77,3 +78,37 @@ class TestFactory:
 
         assert isinstance(source, MassiveDataSource)
         assert source._cache is cache
+
+    def test_sources_are_returned_unstarted(self):
+        """The caller awaits start(tickers); the factory never does."""
+        with patch.dict(os.environ, {}, clear=True):
+            source = create_market_data_source(PriceCache())
+
+        assert source.get_tickers() == []
+        assert source._task is None
+
+    def test_both_sources_report_a_name(self):
+        """Surfaced at /api/health so a silent fallback is visible."""
+        with patch.dict(os.environ, {}, clear=True):
+            assert create_market_data_source(PriceCache()).name == "simulator"
+        with patch.dict(os.environ, {"MASSIVE_API_KEY": "k"}, clear=True):
+            assert create_market_data_source(PriceCache()).name == "massive"
+
+    def test_both_sources_satisfy_the_interface(self):
+        """Neither implementation may quietly skip an abstract method."""
+        with patch.dict(os.environ, {}, clear=True):
+            simulator = create_market_data_source(PriceCache())
+        with patch.dict(os.environ, {"MASSIVE_API_KEY": "k"}, clear=True):
+            massive = create_market_data_source(PriceCache())
+
+        for source in (simulator, massive):
+            assert isinstance(source, MarketDataSource)
+            for method in (
+                "start",
+                "stop",
+                "add_ticker",
+                "remove_ticker",
+                "get_tickers",
+                "supports_ticker",
+            ):
+                assert callable(getattr(source, method))
