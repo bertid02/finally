@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 
+import pytest
 from httpx import ASGITransport, AsyncClient
 
 from app.config import DEFAULT_STATIC_DIR, Settings, load_settings
@@ -96,11 +97,20 @@ async def test_root_explains_a_missing_frontend_build(client):
     assert response.json()["status"] == "ok"
 
 
-async def test_static_export_is_served_when_present(tmp_path):
+@pytest.mark.parametrize("has_404_page", [True, False], ids=["with-404-html", "no-404-html"])
+async def test_static_export_is_served_when_present(tmp_path, has_404_page):
+    """Parametrized over `404.html` deliberately.
+
+    Every real `next build` export contains one, and Starlette's `html=True`
+    serves it *instead of* raising -- so a fixture without it exercises a code
+    path that does not exist in production. Both branches must behave identically.
+    """
     static = tmp_path / "static"
     (static / "_next").mkdir(parents=True)
     (static / "index.html").write_text("<html>FinAlly</html>")
     (static / "_next" / "app.js").write_text("console.log(1)")
+    if has_404_page:
+        (static / "404.html").write_text("<html>This page could not be found</html>")
 
     settings = Settings(
         static_dir=static, db_path=":memory:", massive_api_key="", llm_mock=False
@@ -112,15 +122,27 @@ async def test_static_export_is_served_when_present(tmp_path):
             async with AsyncClient(transport=transport, base_url="http://test") as http:
                 assert (await http.get("/")).text == "<html>FinAlly</html>"
                 assert (await http.get("/_next/app.js")).status_code == 200
-                # Unknown non-API path falls back to the SPA shell...
+
+                # Unknown non-API path falls back to the SPA shell, not to
+                # Next's static 404 page -- the client-side router owns it.
                 deep = await http.get("/some/client/route")
                 assert deep.status_code == 200
                 assert deep.text == "<html>FinAlly</html>"
-                # ...but an unrouted /api path must stay a JSON 404, or the
-                # frontend's fetch fails on JSON.parse instead of on a status.
+
+                # A non-GET to the static mount is a 405 from StaticFiles, and
+                # must stay one: falling back to the SPA shell would answer a
+                # bad request with a cheerful 200.
+                posted = await http.post("/some/client/route")
+                assert posted.status_code == 405
+                assert posted.json()["error"]["code"] == "HTTP_ERROR"
+
+                # An unrouted /api path must stay a JSON 404, or the frontend's
+                # fetch fails on JSON.parse instead of on a status it can report.
                 missing = await http.get("/api/nope")
                 assert missing.status_code == 404
+                assert missing.headers["content-type"].startswith("application/json")
                 assert missing.json()["error"]["code"] == "NOT_FOUND"
+
                 # API routes still win over the catch-all mount.
                 assert (await http.get("/api/health")).json()["static"] is True
     finally:

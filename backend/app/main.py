@@ -22,7 +22,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.staticfiles import StaticFiles
 from starlette.types import Scope
 
-from app.api import health_router, portfolio_router, watchlist_router
+from app.api import chat_router, health_router, portfolio_router, watchlist_router
 from app.api.errors import register_error_handlers
 from app.config import Settings, load_settings
 from app.db import Database, Repository, set_database
@@ -40,18 +40,41 @@ class SPAStaticFiles(StaticFiles):
     a deep link the export did not pre-render, a reload on a client-side route --
     falls back to index.html so the SPA can route it itself.
 
-    `/api/*` is excluded from the fallback. Without that exclusion a typo'd
-    endpoint would return 200 and a page of HTML, and the frontend's fetch would
-    fail on `JSON.parse` rather than on a status code it can report.
+    Two things make this subtler than it looks, and both were found the hard way:
+
+    1. `/api/*` must never reach the static layer at all. If it does, the frontend
+       gets a page of HTML and dies on `JSON.parse` rather than on a status code
+       it can report. So the 404 is decided *before* `super()` is consulted.
+
+    2. `html=True` answers its own 404s. Starlette serves `404.html` from the
+       directory -- with status 404 -- instead of raising, and every `next build`
+       export contains a `404.html`. Catching the exception is therefore not
+       enough: the *status* of a successful response has to be inspected too, or
+       the fallback is dead code in production while looking live under a test
+       fixture that happens to have no 404.html.
     """
 
     async def get_response(self, path: str, scope: Scope):
+        if path.startswith("api/"):
+            # Unrouted API path. Raising here lets the app's registered handler
+            # turn it into the standard JSON envelope, same as any other 404.
+            raise StarletteHTTPException(status_code=404)
+
         try:
-            return await super().get_response(path, scope)
+            response = await super().get_response(path, scope)
         except StarletteHTTPException as exc:
-            if exc.status_code != 404 or path.startswith("api/"):
+            if exc.status_code != 404:
                 raise
-            return await super().get_response("index.html", scope)
+            return await self._spa_shell(scope)
+
+        # The 404.html case: a response, not an exception.
+        if response.status_code == 404:
+            return await self._spa_shell(scope)
+        return response
+
+    async def _spa_shell(self, scope: Scope):
+        """Serve index.html so the client-side router can handle the path itself."""
+        return await super().get_response("index.html", scope)
 
 
 async def _start_market_data(app: FastAPI, tickers: list[str]) -> None:
@@ -130,6 +153,7 @@ def create_app(settings: Settings | None = None, database: Database | None = Non
     register_error_handlers(app)
 
     app.include_router(health_router)
+    app.include_router(chat_router)
     app.include_router(portfolio_router)
     app.include_router(watchlist_router)
     # The SSE router is built by the market module against our cache. Do not

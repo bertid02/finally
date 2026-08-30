@@ -1,0 +1,50 @@
+# Everything the build must never see. A host .venv copied into the image is the
+# dangerous one: this host runs Python 3.14, the image runs 3.12, and the stale
+# venv would shadow the one uv builds.
+
+# Python
+**/.venv/
+**/venv/
+**/__pycache__/
+**/*.py[cod]
+**/.pytest_cache/
+**/.ruff_cache/
+**/.mypy_cache/
+**/.coverage
+**/htmlcov/
+**/*.egg-info/
+
+# Node / Next.js — installed and built inside stage 1
+**/node_modules/
+**/.next/
+**/out/
+**/*.tsbuildinfo
+
+# Runtime database. Never bake a developer's portfolio into the image.
+db/
+**/*.db
+**/*.db-journal
+**/*.db-wal
+**/*.db-shm
+
+# VCS, tooling, docs, secrets
+.git/
+.github/
+.gitignore
+.claude/
+**/.claude/
+.env
+.env.*
+planning/
+test/
+scripts/
+docker-compose.yml
+Dockerfile
+.dockerignore
+README.md
+LICENSE
+CLAUDE.md
+**/CLAUDE.md
+backend/tests/
+backend/market_data_demo.py
+**/.DS_Store

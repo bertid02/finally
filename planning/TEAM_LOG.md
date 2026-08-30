@@ -443,3 +443,322 @@ through `httpx.ASGITransport` — it buffers the whole response, so it never see
 the first frame of an endless stream and simply hangs. `tests/api/test_app.py`
 drives the ASGI app directly instead (`_read_sse`). Playwright's `EventSource` is
 unaffected.
+
+---
+
+## Contract: devops-engineer — image, compose, scripts (2026-08-30)
+
+Owner: `devops-engineer` · Files: `Dockerfile`, `.dockerignore`, `docker-compose.yml`,
+`scripts/**`, `.env.example`, `db/.gitkeep`, plus four `db/*.db*` lines in `.gitignore`.
+
+No application code was changed and no change is required — see the one bug filed
+below, which is a pre-existing app-side defect the container merely exposes.
+
+### The names all three entry points share
+
+`docker compose up -d`, `scripts/start_mac.sh` and `scripts/start_windows.ps1`
+drive the **same** image tag, container and volume, so starting with one and
+stopping with another works:
+
+| | |
+|---|---|
+| image | `finally:latest` |
+| container | `finally` |
+| volume | `finally-data` → `/app/db` |
+| port | `8000:8000` |
+
+The compose volume is declared `name: finally-data` explicitly. Without that,
+Compose would prefix it with the project directory name and the scripts and
+compose would quietly keep two different databases.
+
+**Stop never removes the volume.** Both stop scripts say so and print the
+`docker volume rm finally-data` incantation for anyone who actually wants a
+clean slate.
+
+### Environment the image sets
+
+```
+FINALLY_DB_PATH=/app/db/finally.db     # db-engineer's request; no dependence on cwd
+FINALLY_STATIC_DIR=/app/static         # frontend-engineer's export lands here
+```
+
+Both are baked into the image, so neither depends on `.env`. `.env` supplies only
+the three PLAN.md §5 variables and is passed with `--env-file` / `env_file`.
+A missing `.env` is caught by the scripts before Docker is invoked and reported
+as "create one from .env.example and set OPENROUTER_API_KEY", not as a Docker error.
+
+### Layer cache — why a new dependency costs nothing
+
+Both stages copy manifests, install, then copy source:
+
+- stage 1: `package.json` + `package-lock.json` → `npm ci` → `frontend/`
+- stage 2: `pyproject.toml` + `uv.lock` + `README.md` →
+  `uv sync --locked --no-dev --no-install-project` → `backend/app`
+
+`--no-install-project` means the venv is built from the lockfile alone and the
+`app` package is imported from the working directory, so **editing a route or a
+component never invalidates a dependency layer**. `--locked` fails the build
+loudly if `uv.lock` is stale against `pyproject.toml` — the right failure when
+someone adds a dependency without relocking.
+
+**llm-engineer:** `litellm` is already in `backend/uv.lock` and `uv sync --locked`
+resolved it during my build attempt (it pulled `boto3`/`botocore` transitively —
+roughly 15 MB of extra wheels, worth knowing but not worth acting on). Stage 3
+needs no Dockerfile change.
+
+### Other properties
+
+Non-root `finally` uid 10001; `/app/db` is created and chowned in the image so the
+named volume inherits that ownership on first mount, otherwise SQLite cannot write
+its journal. `HEALTHCHECK` hits `/api/health` via `urllib` rather than curl, which
+is not in `python:3.12-slim`. `.dockerignore` excludes `.venv`, `node_modules`,
+`.next`, `out`, `.git`, `db/`, `*.db`, `__pycache__`, `.env`, `backend/tests/` —
+the host `.venv` is the dangerous one, since this host runs Python 3.14 and the
+image runs 3.12.
+
+### Verification status — read this before trusting the image
+
+**The image has not been built.** The host disk is full (228Gi capacity, 185Gi
+used, 2.2Gi free) and Docker Desktop's containerd metadata store is corrupted as
+a result — `docker build`, `docker system df` and even `docker builder prune` all
+fail with `input/output error`. This needs the user to free disk and repair Docker
+Desktop; it is not a defect in any file here. Details are with `team-lead`.
+
+What I verified instead, on the host, with the **exact** env vars the image sets
+(`FINALLY_DB_PATH`, `FINALLY_STATIC_DIR` pointed at a real `npm run build` export):
+`npm run build` → `frontend/out/` clean; `/api/health` 200 reporting
+`market_source: simulator, static: true`; `/` served the real 15 KB export and a
+hashed `/_next/static/chunks/*.js` asset 200; the SSE stream emitted a keyed
+multi-ticker frame after `retry: 1000`; buy 10 AAPL round-tripped
+(cash 10000 → 8103.40, position and snapshot written); oversell returned
+`409 INSUFFICIENT_SHARES` in the envelope; watchlist add/remove returned the full
+list; and the portfolio survived a process restart against the same
+`FINALLY_DB_PATH`. That exercises every contract the container depends on except
+image assembly itself.
+
+---
+
+### devops-engineer → backend-api-engineer (2026-08-30)
+
+**`SPAStaticFiles` never runs: a real Next export ships `404.html`, and
+`StaticFiles(html=True)` serves it before your handler sees the miss.**
+
+`backend/app/main.py:50` — both halves of `SPAStaticFiles.get_response` are dead
+code against the actual export. Starlette's `StaticFiles`, when `html=True` and
+the directory contains `404.html`, returns that file with status 404 *instead of*
+raising `StarletteHTTPException`. Your `except` clause is therefore never entered,
+so neither the `index.html` fallback nor the `path.startswith("api/")` exclusion
+takes effect. `frontend/out/404.html` exists in every build.
+
+Observed, serving `frontend/out` via `FINALLY_STATIC_DIR`:
+
+```
+/some/deep/route  -> HTTP 404  text/html   (Next's "This page could not be found")
+/api/nope         -> HTTP 404  text/html   (same page)
+```
+
+Expected per your own contract: 200 + `index.html`, and
+`{"error":{"code":"NOT_FOUND","message":"Not Found"}}`.
+
+Confirmed the mechanism by copying the export, deleting **only** `404.html`, and
+re-serving the copy. Same build, same code, one file removed:
+
+```
+/some/deep/route  -> HTTP 200  text/html    <!DOCTYPE html>... (index.html)
+/api/nope         -> HTTP 404  application/json
+                     {"error":{"code":"NOT_FOUND","message":"Not Found"}}
+```
+
+The second line is the one that costs: an unrouted `/api/*` path returns a page
+of HTML, so the frontend fails on `JSON.parse` rather than on a status code it can
+report — precisely the failure your comment says the exclusion exists to prevent.
+`integration-tester` will hit this as a confusing E2E failure in Stage 5.
+
+Why the API tests miss it: a fixture static directory holds an `index.html` and no
+`404.html`, so the exception path is real under test and dead in production.
+
+This is yours to fix (`app/main.py` is your file, and I do not edit application
+code). The fix is in `SPAStaticFiles`, not in the export — deleting `404.html` in
+the Dockerfile would paper over it and leave `uv run` behaving differently from
+the container. Suggest overriding so a 404 is decided before `html=True` gets to
+answer it, e.g. handle the `api/` prefix and the `index.html` fallback explicitly
+rather than relying on the raise. Please add a test that points the mount at a
+directory containing **both** `index.html` and `404.html`.
+
+---
+
+## Contract: llm-engineer — chat endpoint and LLM subsystem (2026-08-30)
+
+`backend/app/llm/**`, `backend/app/api/chat.py`, `backend/tests/llm/**`. Stage 3
+is complete. `POST /api/chat` is live and registered in `create_app()` before
+`_mount_frontend(...)`.
+
+### Response shape — implemented exactly as ruled
+
+All five fields, populated on **every** turn, including degraded ones:
+
+```json
+{"message": "...",
+ "actions": {"trades": [...], "watchlist_changes": [...]},
+ "watchlist": ["AAPL", "..."],
+ "cash_balance": 8095.00,
+ "positions": [{"ticker": "AAPL", "quantity": 10, "avg_cost": 190.50}]}
+```
+
+`actions` always carries both keys, empty lists included, so the frontend can
+render `actions.trades` without a presence check. The echoes are read *after*
+execution, so a turn that traded or changed the watchlist returns the resulting
+state — `frontend-engineer`, the refetch path should never fire.
+
+`actions` entries are the PLAN.md §7 shape verbatim:
+
+```json
+{"ticker": "AAPL", "side": "buy", "quantity": 10, "status": "executed",
+ "price": 190.50, "total": 1905.00}
+{"ticker": "NVDA", "side": "buy", "quantity": 100000, "status": "failed",
+ "error_code": "INSUFFICIENT_CASH", "error": "Insufficient cash: need …, have …"}
+{"ticker": "PYPL", "action": "add", "status": "executed"}
+```
+
+`error` is `exc.message` copied verbatim from the database/API exception — the
+same words `POST /api/portfolio/trade` would have put in the envelope.
+
+### The only non-200
+
+`INVALID_MESSAGE` (400) — an empty or whitespace-only `message`, in the standard
+envelope. A body with no `message` field at all is `INVALID_REQUEST` (422) from
+`backend-api-engineer`'s existing validation handler.
+
+Everything else is a 200: a provider outage, unparseable JSON, a missing
+`message`, a trade the account cannot afford. A chat panel that answers with an
+HTTP error gives the user nothing to act on.
+
+| Failure | Behaviour |
+|---|---|
+| Provider unreachable / any LiteLLM exception / empty content | 200, `message` = "I couldn't reach the AI service just now, so I haven't changed anything. Please try again in a moment.", no actions |
+| Response is not JSON, or is JSON that is not an object | 200, `message` = "I got a garbled response from the AI service and haven't changed anything. Please try asking again.", no actions |
+| Response is a valid object with no usable `message` | 200, `message` = `"Done."`, **actions still execute** — the user asked for the trade |
+| Trade or watchlist action rejected | 200, entry recorded with `status: "failed"`, `error_code`, `error`; other actions in the same turn still run |
+| Malformed action entry (missing ticker, `"quantity": "ten"`) | kept, not dropped — it fails downstream with a real §8 code so the user sees a chip explaining why |
+
+One new code, `INVALID_ACTION` (400), appears only inside a failed
+`watchlist_changes` entry when the model asks for something that is neither
+`add` nor `remove`. It never reaches an HTTP status.
+
+### Contract: LLM_MOCK mapping
+
+**`integration-tester`: code against this.** Case-insensitive substring match on
+the user's message, **first rule wins** — a later trigger is shadowed by an
+earlier one, so "add NVDA to the watchlist and sell AAPL" is a watchlist change
+and places no trade.
+
+| # | Trigger in the message | Result |
+|---|---|---|
+| 1 | `malformed` | provider returns prose, not JSON → the unparseable path above |
+| 2 | `unavailable` | provider raises → the outage path above |
+| 3 | `yolo` or `all in` | buy 100000 NVDA → **fails `INSUFFICIENT_CASH`**, one failed trade chip |
+| 4 | `unwatch` or `remove` | watchlist remove; ticker from the message, else `NFLX` |
+| 5 | `watch` or `add` | watchlist add; ticker from the message, else `PYPL` |
+| 6 | `sell` | sell; ticker from the message else `AAPL`, quantity from the message else 1 |
+| 7 | `buy` | buy; ticker from the message else `AAPL`, quantity from the message else 1 |
+| — | anything else | conversational reply, both action lists empty |
+
+Ticker extraction: the first bare uppercase 1–5 letter token that is not a
+command word (`BUY`, `SELL`, `ADD`, `THE`, `I`, …). Quantity: the first number in
+the message, integer or decimal. So `buy 5 TSLA` buys 5 TSLA, `BUY 5 TSLA` does
+the same, and `buy` buys 1 AAPL.
+
+Suggested E2E fixtures, covering the three cases §12 needs:
+
+- `"How is my portfolio doing?"` → prose only, no chips
+- `"buy 2 AAPL"` → one green executed chip; cash drops; a position appears
+- `"yolo"` → one red chip carrying `INSUFFICIENT_CASH`; cash unchanged
+
+The mock returns a JSON **string**, exactly as the provider would, so mock and
+live traffic go through the same parser — the parser is exercised in every E2E
+run rather than bypassed.
+
+### The provider call
+
+`app/llm/client.py`: LiteLLM → OpenRouter → model `openrouter/openai/gpt-oss-120b`
+with `extra_body={"provider": {"order": ["cerebras"]}}`, `reasoning_effort="low"`,
+and `response_format=LLMResponse` for structured outputs, per the project's
+`cerebras` skill. The `openai` SDK is not used. The synchronous `completion` call
+runs in a worker thread — blocking the event loop for an inference would stall
+the SSE stream every ticker on the page reads from. `import litellm` is lazy
+(seconds of import time, on first call only).
+
+`app/llm/prompt.py` rebuilds the portfolio context every turn from
+`build_valuation(repo, cache)` + `repo.get_realized_pnl()` + the watchlist — never
+carried in the conversation, because a stale price in the history is
+indistinguishable from a current one. Watchlist entries use
+`change_percent_session`, never `change_percent`. Stored assistant turns are
+replayed with their action outcomes appended, so a failed trade is fed back to
+the model on the next turn as PLAN.md §9 requires.
+
+### Auto-execution reuses the manual path
+
+`validate_ticker` → `repo.execute_trade(price=cache.get_price(ticker),
+market_prices=prices_from_cache(cache))`, the copy-pasteable block from
+`backend-api-engineer`'s entry, wrapped in `except DatabaseError`. Watchlist
+changes mirror `app/api/watchlist.py` check for check: format → already present →
+`WATCHLIST_FULL` → `supports_ticker` → insert → `source.add_ticker`; removals call
+`source.remove_ticker` so the cache is evicted. Trades run before watchlist
+changes; both lists are always present in the response.
+
+### llm-engineer → backend-api-engineer / devops-engineer (2026-08-30)
+
+1. **`backend/pyproject.toml` edited with team-lead's approval** (Stage 2 is
+   finished): added `litellm>=1.50.0` and `pydantic>=2.9.0` to `[project]
+   dependencies`, then `uv sync --extra dev` — `uv.lock` is updated. Resolved to
+   litellm 1.98.0. No other change to that file.
+2. **devops-engineer:** nothing in the backend calls `load_dotenv`. `OPENROUTER_API_KEY`
+   and `LLM_MOCK` must reach the process as real environment variables —
+   `docker run --env-file .env` or compose's `env_file:` both do this. Without the
+   key, chat still returns 200 with the "couldn't reach the AI service" message
+   rather than failing at startup, so a missing key is a soft failure, not a crash.
+
+### Tests
+
+`backend/tests/llm/` — **105 tests** (schema 22, mock 16, prompt 12, client 5,
+service 37, HTTP 13). Suite total **600 passing**, ruff clean, statement coverage
+**100% of `app/`** — including `app/llm/` and `app/api/chat.py` — so the 495/100%
+baseline is not regressed. No test touches the network: the real provider is
+reached only through a patched `_load_completion`, and one test imports LiteLLM
+to assert the lazy import resolves.
+
+### backend-api-engineer → devops-engineer (2026-08-30)
+
+**Fixed: `404.html` shadowed the SPA fallback.** Your diagnosis was exact, and the
+copy-the-export-and-delete-404.html isolation is what made it a five-minute fix
+rather than an afternoon. Corrected in `SPAStaticFiles` (`backend/app/main.py`),
+not at build time — a Dockerfile hack would have made `uv run` and the container
+disagree, which is the same class of gap that hid this in the first place.
+
+Two changes:
+
+1. `/api/*` is now refused **before** `super()` is consulted, so nothing about
+   how `StaticFiles` chooses to answer can affect it.
+2. A *successful* response with status 404 — Starlette serving `404.html` under
+   `html=True` — now falls back to the SPA shell too, alongside the raised-404
+   path that was already handled.
+
+Verified against your reproduction, `FINALLY_STATIC_DIR` pointed at the real
+`frontend/out/` with `404.html` present:
+
+```
+/                  -> 200 text/html         (index.html)
+/some/deep/route   -> 200 text/html         (index.html, not Next's 404 page)
+/icon.svg          -> 200 image/svg+xml
+/api/health        -> 200 application/json
+/api/nope          -> 404 application/json  {"error":{"code":"NOT_FOUND","message":"Not Found"}}
+POST /some/deep/route -> 405 application/json {"error":{"code":"HTTP_ERROR", ...}}
+```
+
+`tests/api/test_app.py::test_static_export_is_served_when_present` is now
+parametrized over `404.html` present/absent, so the production shape is the one
+under test and this cannot regress silently. The 405 line is asserted too: a
+non-GET to the static mount must stay a 405 rather than being answered with a
+cheerful 200 and the SPA shell.
+
+Suite: **601 passing, 100% statement coverage of `app/`**, ruff clean.
