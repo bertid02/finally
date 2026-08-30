@@ -47,15 +47,23 @@ if ($LASTEXITCODE -ne 0) {
     exit 1
 }
 
-if (-not (Test-Path (Join-Path $Root '.env'))) {
-    Write-Host "Error: no .env file at $Root\.env" -ForegroundColor Red
+# A missing .env is a warning, not an error. The app runs fine without one --
+# simulator prices, $10k portfolio, trading, charts -- and only the AI chat panel
+# is dead, because that is the one thing needing OPENROUTER_API_KEY. Refusing to
+# start would break the "clone and run one command" promise for a student who
+# just wants to see the terminal. docker-compose.yml tolerates it the same way.
+$HasEnvFile = Test-Path (Join-Path $Root '.env')
+if (-not $HasEnvFile) {
     Write-Host ""
-    Write-Host "Create one from the template and add your OpenRouter key:"
-    Write-Host "    Copy-Item .env.example .env"
-    Write-Host "    notepad .env        # set OPENROUTER_API_KEY"
+    Write-Host "  ! No .env file found at $Root\.env" -ForegroundColor Yellow
+    Write-Host "    Starting anyway. Market data, trading and charts all work."
+    Write-Host "    The AI chat panel will NOT work until you add an OpenRouter key:"
     Write-Host ""
-    Write-Host "Leave MASSIVE_API_KEY empty to use the built-in market simulator."
-    exit 1
+    Write-Host "        Copy-Item .env.example .env"
+    Write-Host "        notepad .env        # set OPENROUTER_API_KEY"
+    Write-Host ""
+    Write-Host "    Then re-run this script. Leave MASSIVE_API_KEY empty for the simulator."
+    Write-Host ""
 }
 
 docker image inspect $Image *> $null
@@ -77,13 +85,18 @@ if ($LASTEXITCODE -eq 0) {
 }
 
 Write-Host "==> Starting $Container on port $Port"
-docker run -d `
-    --name $Container `
-    --env-file .env `
-    -p "${Port}:8000" `
-    -v "${Volume}:/app/db" `
-    --restart unless-stopped `
-    $Image *> $null
+# Built as one array and splatted, so the --env-file pair is simply absent when
+# there is no .env. Inlining an empty array into a native command call is not
+# reliably a no-op in Windows PowerShell 5.1, which is what students will have.
+$RunArgs = @('run', '-d', '--name', $Container)
+if ($HasEnvFile) { $RunArgs += @('--env-file', '.env') }
+$RunArgs += @(
+    '-p', "${Port}:8000",
+    '-v', "${Volume}:/app/db",
+    '--restart', 'unless-stopped',
+    $Image
+)
+docker @RunArgs *> $null
 if ($LASTEXITCODE -ne 0) { Write-Error "docker run failed. Is port $Port already in use?"; exit 1 }
 
 # Wait for the app rather than telling the user to refresh until it works.

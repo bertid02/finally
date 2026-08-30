@@ -1,0 +1,105 @@
+# FinAlly end-to-end harness.
+#
+# Run it, from the repository root:
+#
+#   docker compose -f test/docker-compose.test.yml up --build \
+#     --abort-on-container-exit --exit-code-from playwright
+#   docker compose -f test/docker-compose.test.yml down -v
+#
+# `--exit-code-from playwright` makes the suite's exit code the command's, and
+# `--abort-on-container-exit` stops the app as soon as the run finishes rather
+# than leaving it up. The report lands in test/playwright-report/.
+#
+# Two containers, and the split is the point (PLAN.md §12): the app container is
+# the *production* image, unmodified, and every browser dependency lives in a
+# second container that never ships. Adding Playwright to the Dockerfile would
+# put ~500MB of Chromium into the artifact students download.
+#
+# Differences from the production `docker-compose.yml`, all deliberate:
+#
+#   - **`environment:`, not `env_file: .env`.** A developer's `.env` may carry a
+#     real MASSIVE_API_KEY or LLM_MOCK=false, either of which turns this suite
+#     into a slow, non-deterministic, occasionally-charged mess whose failures
+#     look like application bugs. The environment is stated in full here instead.
+#   - **A tmpfs over `/app/db`, not the `finally-data` volume.** Every run starts
+#     from a database the backend has just created and seeded, which is what
+#     `01-fresh-start.spec.ts` asserts. Reusing the production volume would also
+#     mean the suite quietly spent the user's demo portfolio.
+#   - **No published port.** Nothing outside the compose network needs to reach
+#     the app, and binding 8000 would collide with a container the developer is
+#     already running. Add `ports: ["8001:8000"]` under `app` if you want to look
+#     at the terminal the suite is driving.
+#
+# The build context is the repository root, because that is what the Dockerfile
+# expects (`COPY frontend/…`, `COPY backend/…`) and what the root `.dockerignore`
+# is written against — it already excludes `test/`, so this directory never
+# enters the image.
+
+name: finally-e2e
+
+services:
+  app:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: finally:e2e
+    environment:
+      # Deterministic canned replies from app/llm/mock.py. Every assertion in
+      # 06-chat.spec.ts is pinned to that mapping.
+      LLM_MOCK: "true"
+      # Never used in mock mode, but `.env.example` documents it as required and
+      # a present-but-inert value keeps the failure mode obvious if mock mode is
+      # ever switched off here by accident.
+      OPENROUTER_API_KEY: "e2e-unused"
+      # Empty selects the in-process simulator: no network, no rate limit, and
+      # ~500ms ticks so the specs are not waiting 15s for a price.
+      MASSIVE_API_KEY: ""
+      # Both are already baked into the image; restated so a reader of this file
+      # can see where the database and the static export live without opening the
+      # Dockerfile.
+      FINALLY_DB_PATH: /app/db/finally.db
+      FINALLY_STATIC_DIR: /app/static
+    tmpfs:
+      # mode=1777 because the image runs as uid 10001 and a default-mode tmpfs
+      # would land root-owned, leaving SQLite unable to create its journal.
+      - /app/db:mode=1777
+    healthcheck:
+      # Same probe as the image's own HEALTHCHECK, retimed: the suite should wait
+      # seconds for a cold start, not the 30s production interval.
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request as u, sys; sys.exit(0 if u.urlopen('http://127.0.0.1:8000/api/health', timeout=4).status == 200 else 1)"
+      interval: 2s
+      timeout: 5s
+      start_period: 5s
+      retries: 30
+
+  playwright:
+    # This tag must match `@playwright/test` in package.json exactly — the image
+    # ships browsers built for one specific Playwright version and the runner
+    # refuses to drive a mismatched pair. Bumping means editing both.
+    image: mcr.microsoft.com/playwright:v1.62.1-noble
+    depends_on:
+      app:
+        condition: service_healthy
+    environment:
+      E2E_BASE_URL: http://app:8000
+      CI: "true"
+      # The browsers are pre-installed in the image; keep npm from downloading a
+      # second copy into the bind mount.
+      PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+      PLAYWRIGHT_BROWSERS_PATH: /ms-playwright
+    volumes:
+      # The suite is bind-mounted rather than copied so a spec edit needs no
+      # rebuild. `node_modules`, `playwright-report/` and `test-results/` land
+      # back on the host, which is why test/.gitignore exists.
+      - .:/e2e
+    working_dir: /e2e
+    ipc: host # Chromium crashes on the default 64MB /dev/shm.
+    # `npm ci` rather than `npm install`: the bind mount may already hold a
+    # node_modules installed on the developer's host, and ci replaces it outright
+    # from the committed lockfile instead of merging two platforms' trees.
+    command: >
+      sh -c "npm ci --no-audit --no-fund --loglevel=error && npx playwright test"

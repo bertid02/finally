@@ -41,9 +41,10 @@ export default defineConfig({
     timeout: 15_000,
   },
 
-  reporter: process.env.CI
-    ? [["list"], ["html", { open: "never", outputFolder: "playwright-report" }]]
-    : [["list"], ["html", { open: "never", outputFolder: "playwright-report" }]],
+  // `list` for the compose log, `html` for the artefact left behind in
+  // test/playwright-report/ — with traces, screenshots and video for anything
+  // that failed. Never auto-opened: there is no browser in the container.
+  reporter: [["list"], ["html", { open: "never", outputFolder: "playwright-report" }]],
 
   use: {
     // In the compose harness this is http://app:8000. Set it to

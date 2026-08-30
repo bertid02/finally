@@ -45,15 +45,25 @@ if ! docker info >/dev/null 2>&1; then
   exit 1
 fi
 
-if [ ! -f .env ]; then
-  echo "Error: no .env file at ${ROOT}/.env" >&2
-  echo >&2
-  echo "Create one from the template and add your OpenRouter key:" >&2
-  echo "    cp .env.example .env" >&2
-  echo "    \$EDITOR .env        # set OPENROUTER_API_KEY" >&2
-  echo >&2
-  echo "Leave MASSIVE_API_KEY empty to use the built-in market simulator." >&2
-  exit 1
+# A missing .env is a warning, not an error. The app runs fine without one --
+# simulator prices, $10k portfolio, trading, charts -- and only the AI chat panel
+# is dead, because that is the one thing needing OPENROUTER_API_KEY. Refusing to
+# start would break the "clone and run one command" promise for a student who
+# just wants to see the terminal. docker-compose.yml tolerates it the same way.
+ENV_ARGS=()
+if [ -f .env ]; then
+  ENV_ARGS=(--env-file .env)
+else
+  echo
+  echo "  ! No .env file found at ${ROOT}/.env"
+  echo "    Starting anyway. Market data, trading and charts all work."
+  echo "    The AI chat panel will NOT work until you add an OpenRouter key:"
+  echo
+  echo "        cp .env.example .env"
+  echo "        \$EDITOR .env        # set OPENROUTER_API_KEY"
+  echo
+  echo "    Then re-run this script. Leave MASSIVE_API_KEY empty for the simulator."
+  echo
 fi
 
 if $FORCE_BUILD || ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
@@ -72,7 +82,7 @@ fi
 echo "==> Starting $CONTAINER on port $PORT"
 docker run -d \
   --name "$CONTAINER" \
-  --env-file .env \
+  ${ENV_ARGS[@]+"${ENV_ARGS[@]}"} \
   -p "${PORT}:8000" \
   -v "${VOLUME}:/app/db" \
   --restart unless-stopped \

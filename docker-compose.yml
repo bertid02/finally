@@ -13,8 +13,16 @@ services:
     container_name: finally
     ports:
       - "8000:8000"
+    # Long-form with `required: false` so a fresh clone works: .env is gitignored
+    # and does not exist until the user creates it. Without this, `docker compose
+    # up` dies on a stat error before the app ever starts, which breaks the
+    # one-command promise. Absent .env means no OPENROUTER_API_KEY, so the app
+    # runs fine on the simulator and only the AI chat panel is dead.
+    # Needs Compose >= 2.24 (Docker Desktop 4.27, Jan 2024). On anything older,
+    # `cp .env.example .env` first, or use scripts/start_mac.sh which checks.
     env_file:
-      - .env
+      - path: .env
+        required: false
     volumes:
       - finally-data:/app/db
     restart: unless-stopped

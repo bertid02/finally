@@ -281,8 +281,17 @@ export class Terminal {
     return this.positions.locator("tbody tr");
   }
 
+  /**
+   * One row of the positions table.
+   *
+   * Matched on the symbol cell by exact accessible name, not `hasText`: the seed
+   * watchlist contains `V`, and a substring filter would select every row whose
+   * ticker, quantity or price happens to contain the letter.
+   */
   positionRow(ticker: string): Locator {
-    return this.positionRows.filter({ hasText: ticker });
+    return this.positionRows.filter({
+      has: this.page.getByRole("cell", { name: ticker, exact: true }),
+    });
   }
 
   async heldQuantity(ticker: string): Promise<number> {

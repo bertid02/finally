@@ -807,3 +807,116 @@ exported variable overriding, `find_dotenv()` called with no arguments so it
 walks to the project root, a missing file, a non-existent path, and flag parsing.
 
 Suite: **615 passing, 100% statement coverage of `app/`**, ruff clean.
+
+---
+
+## Resolved: compose failed on a fresh clone — missing `.env` (2026-08-30)
+
+Owner: `devops-engineer` · Reported by: `integration-tester`, confirmed by `team-lead`
+
+**The bug was real and mine.** `docker-compose.yml` had a short-form
+`env_file: - .env`. `.env` is gitignored, so on a fresh checkout Compose aborted
+before starting anything:
+
+```
+$ docker compose config
+exit=1
+env file /Users/berti/Documents/Projects/finally/.env not found: stat ...: no such file or directory
+```
+
+That breaks PLAN.md §2's core promise — clone, run one command, see a terminal.
+
+**How it got past me, since it is worth not repeating:** my Stage 4 verification
+ran `docker compose config` → exit 0 while a temporary `.env` I had created for
+that check still existed, and I deleted the file immediately afterwards. The
+green was true at the instant it ran and false for every subsequent clone. A
+check whose result depends on a file the check itself created is not a check.
+`integration-tester` greps the shipped artifact rather than trusting a prior
+green, which is exactly why this surfaced.
+
+### Fix
+
+Long-form `env_file` with `required: false`, as the tester suggested:
+
+```yaml
+env_file:
+  - path: .env
+    required: false
+```
+
+**Minimum Compose version: 2.24** (Docker Desktop 4.27, January 2024) — that is
+when `required` was added to the spec. Verified here on **Compose v5.0.2**. The
+constraint is commented in `docker-compose.yml` beside the key, with the fallback
+for anything older (`cp .env.example .env`, or use the start script).
+
+### Verified — both states, explicitly
+
+`docker compose config` needs no daemon, so this stands despite the corrupt
+Docker install. The checkout was left with **no** `.env`, so anyone re-running
+these sees the fresh-clone state:
+
+| State | Result |
+|---|---|
+| `.env` **absent** | `exit=0`, empty stderr, no `environment:` block emitted |
+| `.env` **present** | `exit=0`, `OPENROUTER_API_KEY: sk-sentinel-12345`, `LLM_MOCK: "true"` — values genuinely picked up |
+| `.env` absent again | `exit=0` — confirmed after deleting the probe file |
+
+`finally-data` still resolves unprefixed in the rendered config.
+
+### Second defect found while fixing this, also mine
+
+The fix created a divergence: compose tolerated a missing `.env` while
+`scripts/start_mac.sh` and `start_windows.ps1` still **hard-failed** on it. Two
+documented entry points disagreeing about whether the app can start is worse than
+either behaviour alone, and the scripts' refusal breaks §2 for the same reason
+compose did — the app runs fine without `.env` (simulator prices, $10k portfolio,
+trading, charts); only the AI chat panel needs `OPENROUTER_API_KEY`.
+
+Both start scripts now **warn and continue** rather than exit, and omit
+`--env-file` when there is no file to pass. This is also where the runtime
+warning `team-lead` asked about now lives — a student sees it on the terminal
+they just launched, which a YAML comment could never achieve:
+
+```
+  ! No .env file found at /path/to/finally/.env
+    Starting anyway. Market data, trading and charts all work.
+    The AI chat panel will NOT work until you add an OpenRouter key:
+
+        cp .env.example .env
+        $EDITOR .env        # set OPENROUTER_API_KEY
+```
+
+**A bash 3.2 trap caught on the way:** macOS ships bash 3.2.57, where
+`"${ARR[@]}"` on an **empty** array is an `unbound variable` fatal error under
+`set -u` — which `start_mac.sh` uses. The naive conditional-args version would
+have crashed on every stock Mac in exactly the no-`.env` case it was added to
+handle. Guarded as `${ENV_ARGS[@]+"${ENV_ARGS[@]}"}` and verified under
+`/bin/bash` 3.2 directly. The PowerShell script builds one array and splats it
+(`docker @RunArgs`), because inlining an empty array into a native command call
+is not reliably a no-op in Windows PowerShell 5.1.
+
+Verified by running `start_mac.sh` against a stub `docker` on `PATH` — no daemon
+needed — and asserting the argv it constructs:
+
+```
+no .env  -> run -d --name finally -p 8000:8000 -v finally-data:/app/db --restart unless-stopped finally:latest
+.env     -> run -d --name finally --env-file .env -p 8000:8000 -v finally-data:/app/db --restart unless-stopped finally:latest
+```
+
+**Not verified by execution:** `start_windows.ps1`. There is no `pwsh` on this
+machine, so the PowerShell changes are reviewed but unrun. Whoever has a Windows
+box should exercise both `.env` states before this is called done.
+
+The image itself is still unbuilt — Docker Desktop's store is corrupt and the
+user is purging it. `team-lead` will ping me for the full build-and-run pass.
+
+### devops-engineer → backend-api-engineer (2026-08-30)
+
+Low priority, your call, no rush. A user who starts via `docker compose up`
+rather than the start script gets no warning about a missing `OPENROUTER_API_KEY`
+— the app comes up fine and chat silently fails only when they first try it.
+The start scripts now warn, but compose has nowhere to put a runtime message.
+Would you consider a one-line `logger.warning` at startup when
+`OPENROUTER_API_KEY` is empty and `llm_mock` is False? `/api/health` reporting the
+key's presence as a boolean (never the value) would also let
+`integration-tester` assert it. Both are yours — `app/main.py` and `app/config.py`.
