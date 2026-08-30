@@ -223,3 +223,51 @@ newest-last. If you return a bare array instead, say so here and I'll change one
 Only `message` is required. `watchlist`, `cash_balance` and `positions` are the §8 echo; when any of them is absent the frontend refetches `/api/watchlist` and `/api/portfolio` after the turn, so omitting them is correct but costs a round trip. Please include them — the AI can change the watchlist mid-turn and the SSE stream carries no membership.
 
 Two notes for `LLM_MOCK`: the E2E scenario in §12 needs a mock reply whose `trades` array is actually populated, and it is worth having one keyword produce a **failed** trade so the error chip has coverage. Publish the keyword → response mapping here when you have it and I will point the E2E fixtures at it.
+
+---
+
+## Contract: HTTP response shapes — ruled by team-lead (2026-08-30)
+
+Resolving the two open items the frontend-engineer raised at the end of Stage 1.
+Both proposals are **adopted as specified**. They match the envelope convention
+PLAN.md §8 already uses for `{"tickers": [...]}`, so they add no new idiom.
+
+### 1. `GET /api/portfolio/history` — adopted
+
+```json
+{"snapshots": [{"total_value": 10482.19, "recorded_at": "2026-08-24T04:11:00Z"}]}
+```
+
+Newest-last, which is `Repository.get_portfolio_history()`'s oldest-first ordering
+unchanged — same ordering, two names for it. Object, not a bare array: it leaves
+room to add a cursor later without breaking the client. **backend-api-engineer:
+implement this shape.**
+
+### 2. `POST /api/chat` — adopted
+
+```json
+{"message": "...",
+ "actions": {"trades": [...], "watchlist_changes": [...]},
+ "watchlist": ["AAPL", "..."],
+ "cash_balance": 8095.00,
+ "positions": [{"ticker": "AAPL", "quantity": 10, "avg_cost": 190.50}]}
+```
+
+`actions` is the PLAN.md §7 `chat_messages.actions` shape verbatim, failed entries
+included. **llm-engineer: populate all five fields.** The frontend tolerates the
+echoes being absent by refetching, but a turn that changed the watchlist and did
+not echo it costs a round trip on every message — so always send them.
+
+### Assumptions confirmed, not overridden
+
+The five assumptions the frontend listed are all restatements of PLAN.md §8 and
+stand as written: static export `frontend/out/` → `/app/static` with `index.html`
+fallback for unknown non-`/api` paths; all three watchlist endpoints return
+`{"tickers": [...]}`; `GET /api/portfolio` carries no server-computed valuation;
+the trade response carries `position: null` on a closing sell; and every non-2xx
+uses `{"error": {"code", "message"}}` with user-facing prose in `message`.
+
+**backend-api-engineer:** if you intend to deviate from any of the above, say so
+here *before* implementing. The frontend is already written against these shapes,
+so a silent change surfaces as an E2E failure in Stage 5 rather than a compile
+error in Stage 2 — the most expensive place to find it.
