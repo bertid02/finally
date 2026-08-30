@@ -99,6 +99,27 @@ async def _start_market_data(app: FastAPI, tickers: list[str]) -> None:
     logger.info("Market data running: %s, %d tickers", source.name, len(tickers))
 
 
+def _warn_if_chat_is_dead(settings: Settings) -> None:
+    """Say once, at startup, that the AI chat panel will not work.
+
+    `docker compose up` shows nothing otherwise: the start scripts warn about a
+    missing `.env`, but compose has no such step, and the chat endpoint is
+    deliberately quiet -- it returns 200 with "I couldn't reach the AI service
+    just now" rather than an error. Without this line a misconfigured demo has no
+    loud signal anywhere.
+
+    Silent under `LLM_MOCK`: mock mode needs no key, and warning there is noise
+    that teaches people to ignore warnings.
+    """
+    if settings.llm_mock or settings.llm_configured:
+        return
+    logger.warning(
+        "No OPENROUTER_API_KEY set -- the AI chat panel will NOT work. "
+        "Market data, trading, the portfolio and the charts are unaffected. "
+        "To enable chat: copy .env.example to .env, set OPENROUTER_API_KEY, and restart."
+    )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Open the database, seed it if new, then start streaming its watchlist.
@@ -107,6 +128,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     repository returns, so a user who removed TSLA last session does not find it
     streaming again on restart.
     """
+    _warn_if_chat_is_dead(app.state.settings)
+
     repo: Repository = app.state.repository
     await repo.initialize()
 

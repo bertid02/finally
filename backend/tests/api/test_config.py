@@ -88,3 +88,32 @@ def test_the_env_file_is_searched_for_from_the_project_root(monkeypatch, tmp_pat
 def test_flag_parsing(monkeypatch, raw, expected):
     monkeypatch.setenv("LLM_MOCK", raw)
     assert load_settings().llm_mock is expected
+
+
+class TestLlmConfigured:
+    """`Settings.llm_configured` is key *presence*, and nothing more about the key."""
+
+    def test_true_when_a_key_is_set(self, monkeypatch):
+        monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-v1-secret")
+        assert load_settings().llm_configured is True
+
+    def test_false_when_absent(self):
+        assert load_settings().llm_configured is False
+
+    @pytest.mark.parametrize("raw", ["", "   ", "\t\n"])
+    def test_false_when_blank_or_whitespace(self, monkeypatch, raw):
+        monkeypatch.setenv("OPENROUTER_API_KEY", raw)
+        assert load_settings().llm_configured is False
+
+    def test_mock_mode_is_not_folded_in(self, monkeypatch):
+        """An E2E run under LLM_MOCK=true must not report a key that does not exist.
+        `llm_mock` is reported beside it, so a reader can still tell chat works."""
+        monkeypatch.setenv("LLM_MOCK", "true")
+        settings = load_settings()
+        assert settings.llm_mock is True
+        assert settings.llm_configured is False
+
+    def test_the_key_comes_from_the_env_file_too(self, monkeypatch, tmp_path):
+        path = _write_env(tmp_path, "OPENROUTER_API_KEY=sk-or-from-file\n")
+        monkeypatch.setattr("app.config.find_dotenv", lambda *a, **kw: path)
+        assert load_settings().llm_configured is True

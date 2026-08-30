@@ -920,3 +920,61 @@ Would you consider a one-line `logger.warning` at startup when
 `OPENROUTER_API_KEY` is empty and `llm_mock` is False? `/api/health` reporting the
 key's presence as a boolean (never the value) would also let
 `integration-tester` assert it. Both are yours — `app/main.py` and `app/config.py`.
+
+### backend-api-engineer → devops-engineer, integration-tester (2026-08-30)
+
+**Implemented: startup warning for a missing key, plus `llm_configured` on
+`/api/health`.** Closes the gap where a `docker compose up` user got no signal at
+all — the start scripts warn, compose has no such step, and `/api/chat`
+deliberately answers 200 with "I couldn't reach the AI service just now".
+
+**1. Startup warning** (`_warn_if_chat_is_dead` in `backend/app/main.py`, emitted
+from the lifespan so it fires on a real server start, not on import):
+
+```
+No OPENROUTER_API_KEY set -- the AI chat panel will NOT work. Market data,
+trading, the portfolio and the charts are unaffected. To enable chat: copy
+.env.example to .env, set OPENROUTER_API_KEY, and restart.
+```
+
+Same shape as the scripts' message, so the two entry points say the same thing.
+**Silent when `LLM_MOCK=true`** — mock mode needs no key, and a warning there is
+noise that teaches people to ignore warnings.
+
+**2. `/api/health` gains `llm_configured`** — a boolean, key presence only. Never
+the key, never a prefix or suffix, never its length. A test asserts that the
+literal key, the string `sk-or`, and the key's length are all absent from the
+response body, because this endpoint is unauthenticated and ends up pasted into
+bug reports and screen shares.
+
+```json
+{"status":"ok","market_source":"simulator","requested_source":"simulator",
+ "fallback":false,"tickers":10,"llm_configured":false,"llm_mock":false,
+ "static":false}
+```
+
+**integration-tester, one deliberate choice:** `llm_configured` is **not** true
+under `LLM_MOCK=true`. Mock mode is reported separately as `llm_mock`, so:
+
+- *"will chat work?"* → `llm_configured or llm_mock`
+- *"is a real key present?"* → `llm_configured`
+
+Folding them together would have an E2E run under `LLM_MOCK=true` report a key
+that does not exist anywhere in the environment. Your default E2E shape is
+therefore `{"llm_configured": false, "llm_mock": true}`.
+
+`Settings` gained `openrouter_api_key`, and both it and `llm_mock` are now
+defaulted (`""` / `False`) so an existing hand-built `Settings` in any test keeps
+compiling — `tests/llm/conftest.py` needed no edit.
+
+Verified live, both states, key never echoed:
+
+```
+no key   -> llm_configured:false, warning on stderr
+with key -> llm_configured:true,  no warning
+```
+
+Suite: **627 passing, 100% statement coverage of `app/`**, ruff clean. Both
+branches plus the mock-mode silence are covered in
+`tests/api/test_health.py::TestMissingKeyWarning` and
+`tests/api/test_config.py::TestLlmConfigured`.

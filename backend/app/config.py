@@ -38,12 +38,32 @@ class Settings:
     static_dir: Path
     db_path: str
     massive_api_key: str
-    llm_mock: bool
+    # Defaulted so a test constructing a Settings by hand does not have to
+    # enumerate every key it does not care about. The defaults are the same
+    # "absent" values `load_settings` produces for an empty environment.
+    openrouter_api_key: str = ""
+    llm_mock: bool = False
 
     @property
     def has_static(self) -> bool:
         """True when a built frontend is present. False is normal for `uv run`."""
         return self.static_dir.is_dir() and (self.static_dir / "index.html").is_file()
+
+    @property
+    def llm_configured(self) -> bool:
+        """Is an OpenRouter key present? Key presence only -- nothing else.
+
+        A boolean, and deliberately never anything more. `/api/health` is
+        unauthenticated and gets pasted into bug reports and screen shares, so it
+        must never carry the key, a prefix or suffix of it, or even its length: a
+        length narrows a brute-force search and a prefix identifies the account.
+
+        Mock mode is *not* folded in here. `llm_mock` is reported beside it, so a
+        reader can tell "chat will work" (`llm_mock or llm_configured`) apart from
+        "a real key is present" -- and an E2E run under LLM_MOCK=true does not
+        report a key that does not exist.
+        """
+        return bool(self.openrouter_api_key)
 
     @property
     def requested_source(self) -> str:
@@ -76,5 +96,6 @@ def load_settings() -> Settings:
         static_dir=Path(os.getenv("FINALLY_STATIC_DIR", DEFAULT_STATIC_DIR)),
         db_path=os.getenv("FINALLY_DB_PATH", "db/finally.db"),
         massive_api_key=os.getenv("MASSIVE_API_KEY", "").strip(),
+        openrouter_api_key=os.getenv("OPENROUTER_API_KEY", "").strip(),
         llm_mock=_env_flag("LLM_MOCK"),
     )

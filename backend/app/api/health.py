@@ -31,6 +31,9 @@ async def health(
         "requested_source": settings.requested_source,
         "fallback": running != settings.requested_source,
         "tickers": len(cache),
+        # Presence of an OpenRouter key, and nothing more about it -- this
+        # endpoint is unauthenticated and ends up in bug reports.
+        "llm_configured": settings.llm_configured,
         "llm_mock": settings.llm_mock,
         "static": settings.has_static,
     }
