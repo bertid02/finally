@@ -1,0 +1,68 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html,
+  body {
+    height: 100%;
+    overflow: hidden; /* The console never scrolls; panels scroll internally. */
+  }
+
+  body {
+    @apply bg-void text-ink font-sans antialiased;
+    /* Every figure on screen is compared against the one above it. */
+    font-variant-numeric: tabular-nums;
+    font-feature-settings: "tnum" 1, "ss01" 1;
+  }
+
+  :focus-visible {
+    @apply outline-none ring-1 ring-signal ring-offset-0;
+  }
+
+  ::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    @apply bg-hairline;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    @apply bg-edge;
+  }
+}
+
+@layer components {
+  /* Micro-label: the console's structural voice. Used for every panel title,
+     column head, and field label — never for a value. */
+  .label {
+    @apply font-display text-micro font-semibold uppercase text-mute;
+  }
+
+  .num {
+    @apply font-mono tabular-nums;
+  }
+
+  .field {
+    @apply h-7 bg-raised border border-hairline px-2 font-mono text-data text-ink
+           placeholder:text-mute/60 focus:border-edge focus:outline-none;
+  }
+
+  .btn {
+    @apply h-7 px-3 font-display text-micro font-semibold uppercase
+           border transition-colors disabled:opacity-35 disabled:cursor-not-allowed;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
