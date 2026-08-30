@@ -17,6 +17,8 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
+from dotenv import find_dotenv, load_dotenv
+
 # Where the Dockerfile drops the Next.js static export (frontend-engineer's
 # contract in TEAM_LOG.md). Absent in local development, which must not crash.
 DEFAULT_STATIC_DIR = "/app/static"
@@ -54,7 +56,22 @@ class Settings:
 
 
 def load_settings() -> Settings:
-    """Read the environment. Called once per app, not per request."""
+    """Read the environment, `.env` included. Called once per app, not per request.
+
+    The `.env` load is not optional politeness -- without it PLAN.md section 5 is
+    only half true, in the worst possible way. LiteLLM calls `load_dotenv()` at
+    *its* import, which is lazy and happens on the first chat message, so
+    `OPENROUTER_API_KEY` arrives from `.env` by accident while `LLM_MOCK`,
+    `MASSIVE_API_KEY` and `FINALLY_DB_PATH` -- read here, at app construction,
+    long before that import -- silently do not. The half that fails is the half
+    that changes how the app behaves.
+
+    `override=False` is load-bearing: a variable already exported in the process
+    beats the file, so the container's `--env-file` and `docker run -e` keep
+    winning exactly as they do today. `find_dotenv()` returning "" when there is
+    no `.env` (this checkout, and every container) is a clean no-op.
+    """
+    load_dotenv(find_dotenv(), override=False)
     return Settings(
         static_dir=Path(os.getenv("FINALLY_STATIC_DIR", DEFAULT_STATIC_DIR)),
         db_path=os.getenv("FINALLY_DB_PATH", "db/finally.db"),

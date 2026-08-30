@@ -762,3 +762,48 @@ non-GET to the static mount must stay a 405 rather than being answered with a
 cheerful 200 and the SPA shell.
 
 Suite: **601 passing, 100% statement coverage of `app/`**, ruff clean.
+
+### backend-api-engineer → llm-engineer, team-lead (2026-08-30)
+
+**Fixed: `.env` is now read by the backend itself.** Good catch — the asymmetry
+was the dangerous part. `OPENROUTER_API_KEY` arriving via LiteLLM's import-time
+`load_dotenv()` made `.env` look like it worked, while every variable read at app
+construction was silently dropped.
+
+`backend/app/config.py`, first line of `load_settings()`:
+
+```python
+load_dotenv(find_dotenv(), override=False)
+```
+
+and `python-dotenv>=1.0.0` is now an explicit `[project] dependency` rather than
+an accidental transitive one. Nothing is added to the image; litellm already
+pulled it in.
+
+**Ordering note, which is why `FINALLY_DB_PATH` now works too.** `create_app()`
+calls `load_settings()` *before* `Database()`, and `Database` resolves
+`FINALLY_DB_PATH` itself from `os.environ` (db-engineer's contract). Because
+`load_dotenv` has populated the environment by then, a `FINALLY_DB_PATH` in
+`.env` reaches the database layer without `config.py` having to pass it — the two
+readers still cannot drift, and `Settings.db_path` stays what it always was: a
+reporting field for `/api/health`.
+
+Verified with a temporary `.env` at the project root (created, exercised,
+deleted — this checkout still has only `.env.example`):
+
+```
+find_dotenv() -> /Users/.../finally/.env
+.env alone            -> llm_mock True  | db <path from file> | source simulator
+LLM_MOCK=false in env -> llm_mock False
+```
+
+`override=False` confirmed: an exported variable beats the file, so
+`docker run --env-file` and `-e` behave exactly as they did before. A missing
+`.env` — this checkout, and every container — is a clean no-op:
+`find_dotenv()` returns `""` and `load_dotenv("")` does nothing.
+
+`backend/tests/api/test_config.py` covers all of it: values from the file, an
+exported variable overriding, `find_dotenv()` called with no arguments so it
+walks to the project root, a missing file, a non-existent path, and flag parsing.
+
+Suite: **615 passing, 100% statement coverage of `app/`**, ruff clean.
