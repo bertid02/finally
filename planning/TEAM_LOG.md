@@ -271,3 +271,175 @@ uses `{"error": {"code", "message"}}` with user-facing prose in `message`.
 here *before* implementing. The frontend is already written against these shapes,
 so a silent change surfaces as an E2E failure in Stage 5 rather than a compile
 error in Stage 2 — the most expensive place to find it.
+
+---
+
+## Contract: backend-api-engineer (2026-08-30)
+
+`backend/app/main.py`, `backend/app/config.py`, `backend/app/api/**`. Stage 2 is
+complete: every PLAN.md §8 endpoint is live, the market source runs in the
+lifespan, and the frontend export is served from `/app/static`.
+
+**All shapes ruled by team-lead above are implemented as specified.** Two
+additive deviations are recorded at the bottom of this entry — neither breaks a
+client coded against the ruled shape.
+
+### Endpoints
+
+| Method | Path | Notes |
+|---|---|---|
+| GET | `/api/health` | `{status, market_source, requested_source, fallback, tickers, llm_mock, static}` |
+| GET | `/api/portfolio` | `{cash_balance, positions:[{ticker,quantity,avg_cost}]}` — **unvalued**, per §8/§10 |
+| POST | `/api/portfolio/trade` | `{ticker, quantity, side}` → `{trade, cash_balance, position\|null}` |
+| GET | `/api/portfolio/history` | `?since=&limit=` → `{"snapshots":[…]}`, oldest-first |
+| GET | `/api/watchlist` | `{"tickers":[…]}` |
+| POST | `/api/watchlist` | `{ticker}` → `{"tickers":[…]}` (full new list) |
+| DELETE | `/api/watchlist/{ticker}` | → `{"tickers":[…]}` (full new list) |
+| GET | `/api/stream/prices` | `create_stream_router()` from `app/market/stream.py`, unmodified |
+
+`POST /api/chat` is deliberately absent — it is `llm-engineer`'s
+`backend/app/api/chat.py`. Register it in `create_app()` alongside the other
+three `include_router` calls, **before** `_mount_frontend(app, settings)`.
+
+### What Stage 3 imports
+
+```python
+# The single server-side valuation helper. One formula, one implementation.
+from app.api.valuation import build_valuation, value_portfolio, prices_from_cache
+
+valuation = await build_valuation(repo, cache)   # the one-liner for the chat context
+valuation.total_value                 # cash + Σ(quantity × price)
+valuation.total_unrealized_pnl        # and .._percent
+valuation.positions                   # PositionValuation: price, market_value,
+                                      # cost_basis, unrealized_pnl(_percent),
+                                      # weight (% of total value, cash included),
+                                      # priced (False = valued at avg_cost fallback)
+valuation.to_dict()                   # JSON-ready, for dropping into a prompt
+```
+
+`value_portfolio(portfolio, prices)` is the pure function underneath — no I/O, so
+it is testable without a database. `prices_from_cache(cache)` flattens the cache
+to `{ticker: price}`, which is also exactly what
+`Repository.execute_trade(market_prices=...)` wants. Realized P&L is **not** in
+the valuation: it lives in the trade log, so call `await repo.get_realized_pnl()`.
+
+```python
+# The error vocabulary.
+from app.api.errors import APIError, UnsupportedTickerError, validate_ticker, envelope
+```
+
+- `validate_ticker(raw) -> str` — trim, uppercase, enforce `^[A-Z]{1,5}$`; raises
+  the **database layer's** `InvalidTickerError` so the format rule has one code.
+  Call it before any cache lookup: the cache is keyed by normalized symbol.
+- `UnsupportedTickerError` is the 422; `APIError` is its base and mirrors
+  `DatabaseError`'s surface exactly (`.code`, `.http_status`, `.message`,
+  `.to_envelope()`).
+- Handlers for `DatabaseError`, `APIError`, `RequestValidationError`,
+  `HTTPException` and bare `Exception` are installed by `register_error_handlers`
+  in `create_app`. **Raise, don't catch:** any `DatabaseError` or `APIError` that
+  escapes a route becomes the right envelope at the right status automatically.
+
+```python
+# Request-scoped access to the three long-lived objects.
+from app.api.deps import RepositoryDep, PriceCacheDep, MarketSourceDep
+
+async def chat(body: ChatRequest, repo: RepositoryDep, cache: PriceCacheDep,
+               source: MarketSourceDep) -> dict: ...
+```
+
+They resolve `app.state.repository`, `app.state.price_cache`,
+`app.state.market_source`. `app.state.settings` carries `llm_mock` — read it from
+there rather than calling `os.getenv("LLM_MOCK")` again, so one object decides.
+
+### Reusing the trade path for LLM auto-execution
+
+There is no separate service layer to call; the route body *is* the path, and it
+is three lines. Reproduce them inside the chat turn so a failure can be caught and
+written into `chat_messages.actions` instead of becoming an HTTP error:
+
+```python
+from app.api.errors import validate_ticker
+from app.api.valuation import prices_from_cache
+from app.db import DatabaseError
+
+try:
+    ticker = validate_ticker(spec["ticker"])
+    result = await repo.execute_trade(
+        ticker=ticker, side=spec["side"], quantity=spec["quantity"],
+        price=cache.get_price(ticker),            # None -> UnknownTickerError
+        market_prices=prices_from_cache(cache),
+    )
+    entry = {"ticker": ticker, "side": result.trade.side,
+             "quantity": result.trade.quantity, "status": "executed",
+             "price": result.trade.price, "total": result.trade.total}
+except DatabaseError as exc:                       # covers all seven DB codes
+    entry = {"ticker": spec.get("ticker"), "side": spec.get("side"),
+             "quantity": spec.get("quantity"), "status": "failed",
+             "error_code": exc.code, "error": exc.message}
+```
+
+`exc.message` verbatim is what PLAN.md §7 requires — same words through both
+doors. For watchlist changes, mirror `app/api/watchlist.py`: format → present →
+`WATCHLIST_FULL` → `supports_ticker` (raise `UnsupportedTickerError`) →
+`repo.add_to_watchlist` → `await source.add_ticker(t)`; and
+`repo.remove_from_watchlist` → `await source.remove_ticker(t)` on removal. Then
+echo the returned list as `watchlist` in the response — the stream carries no
+membership.
+
+### Startup, shutdown, static
+
+- `create_app(settings=None, database=None)` builds it; `app = create_app()` at
+  module scope is what `uvicorn app.main:app` serves. Both arguments exist for
+  tests, so a second app with its own in-memory database does not disturb the
+  first.
+- Lifespan: `repo.initialize()` → read the watchlist → start the market source
+  seeded from it. A `RuntimeError` from `start()` (a Massive key whose plan lacks
+  the snapshot endpoint) falls back to `SimulatorDataSource`, and `/api/health`
+  then reports `market_source: "simulator"`, `requested_source: "massive"`,
+  `fallback: true`. Shutdown stops the source and closes the connection.
+- `set_database(db)` is called in `create_app`, so a bare `Repository()` or
+  `get_database()` anywhere in the process reaches the same connection.
+- Static: `SPAStaticFiles` mounted at `/` **last**, after every router, with an
+  `index.html` fallback for unknown non-`/api` paths. `/api/*` is excluded from
+  that fallback — an unrouted API path stays a JSON 404 rather than returning a
+  page of HTML that fails the frontend's `JSON.parse` instead of its status check.
+  A missing directory is not an error: the mount is skipped and `/` returns a
+  short JSON note, so `uv run uvicorn app.main:app` works in a checkout with no
+  frontend build.
+- **devops-engineer:** `FINALLY_DB_PATH=/app/db/finally.db` as db-engineer
+  requested, and `/app/static` for the export. `FINALLY_STATIC_DIR` overrides the
+  static path if you ever need it; the default is already `/app/static`.
+
+### Deviations recorded (both additive)
+
+1. **`/api/portfolio/history` snapshots carry an extra `id`.** The ruled shape is
+   `{"total_value", "recorded_at"}`; the response is `PortfolioSnapshot.to_dict()`,
+   which is that plus `id`. A superset — frontend needs no change. Say so here if
+   you want it stripped.
+2. **Four codes outside PLAN.md §8's eight**, for responses §8 does not cover, so
+   that *every* non-2xx wears the envelope rather than FastAPI's `{"detail": …}`:
+   `INVALID_REQUEST` (422, malformed body with no recognisable field),
+   `NOT_FOUND` (404, unrouted path), `HTTP_ERROR` (405 and friends),
+   `INTERNAL_ERROR` (500, unhandled exception). A malformed `quantity`, `side` or
+   `ticker` field maps onto its §8 code instead, so `{"quantity": "ten"}` and
+   `{"quantity": -1}` report identically. **frontend-engineer / integration-tester:**
+   the eight §8 codes are unchanged; these are extra, and all wear
+   `{"error": {"code", "message"}}`.
+
+### Dependencies
+
+`backend/pyproject.toml` gained `httpx>=0.27.0` under `[dev]` only. `litellm` is
+**not** added — Stage 3's call. No runtime dependency changed.
+
+### Tests
+
+`backend/tests/api/` — 72 tests. Suite total **495 passing**, ruff clean, and
+statement coverage is **100% of `app/`** including `app/api/`, `app/config.py`
+and `app/main.py` (the 423/100% baseline is not regressed). Every one of the
+eight §8 codes is asserted over HTTP in `tests/api/test_errors.py`.
+
+One note for `integration-tester`: `/api/stream/prices` **cannot** be tested
+through `httpx.ASGITransport` — it buffers the whole response, so it never sees
+the first frame of an endless stream and simply hangs. `tests/api/test_app.py`
+drives the ASGI app directly instead (`_read_sse`). Playwright's `EventSource` is
+unaffected.
