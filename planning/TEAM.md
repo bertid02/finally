@@ -2,6 +2,8 @@
 
 Six specialist agents defined in `.claude/agents/`. `PLAN.md` is the shared contract; this file is the ownership map and build order.
 
+**All six stages are complete.** Every path in the table below is populated and the whole thing passes: 627 backend tests at 100% statement coverage of `app/`, 50 frontend, 34 Playwright E2E against the production image, plus `.github/workflows/ci.yml` running all three on every push. The build sequence below is now a record of how it was assembled, and of the dependency order any future change still has to respect.
+
 ## Roster
 
 | Agent | Owns | Never touches |
@@ -52,6 +54,25 @@ Stage 6                              ▼
 ```
 
 The frontend runs in parallel from the start because it codes against the documented API contract, not a running server. It cannot *fully* verify until Stage 2 lands.
+
+### What Stage 5 actually found
+
+Worth recording, because it is the argument for the stage existing at all. The first
+real E2E run produced three defects and **all three were in the test suite, none in
+the application**:
+
+1. A page-object race on the order bar's confirmation notice — it lingers 5s and every
+   confirmation matches the same shape, so a sell placed straight after a buy read the
+   buy's notice. Fixed by waiting on `POST /api/portfolio/trade` instead of the DOM.
+2. A disconnect test built on `context.setOffline(true)`, which cannot pass: Chromium's
+   offline emulation refuses new requests but leaves an established socket alone, so the
+   SSE stream kept delivering events. Replaced with a stream that ends mid-session.
+3. Chromium refusing plain HTTP to the *single-label* host `http://app:8000`, failing
+   every navigation in the container while all 34 passed on loopback. Fixed with a dotted
+   compose alias, `app.finally.test`.
+
+The third one is the load-bearing lesson: a suite only ever run against `127.0.0.1`
+reported green on a harness that could not navigate at all. Run the container path.
 
 ## Contracts that cross boundaries
 

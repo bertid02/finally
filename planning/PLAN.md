@@ -84,39 +84,56 @@ The user runs a single Docker command (or a provided start script). A browser op
 
 ## 4. Directory Structure
 
-This is the **target** structure. `✅` marks what exists in the repo today; everything else is still to be built. Do not assume an unmarked path is populated.
+**Every path below now exists and is built.** The `✅` markers that used to distinguish "built" from "planned" have been dropped because they no longer distinguish anything — the whole tree is populated. Test counts are the current suite, not targets.
 
 ```
 finally/
-├── frontend/                 # Next.js TypeScript project (static export)
-├── backend/               ✅ # FastAPI uv project (Python)
-│   ├── app/market/        ✅ # Market data subsystem (complete — see MARKET_DATA_SUMMARY.md)
-│   ├── tests/             ✅ # pytest suite
-│   └── db/                   # Schema definitions, seed data, migration logic
-├── planning/              ✅ # Project-wide documentation for agents
-│   ├── PLAN.md            ✅ # This document
-│   ├── MARKET_DATA_SUMMARY.md ✅
-│   └── archive/           ✅ # Superseded design docs
+├── frontend/                 # Next.js TypeScript project (static export) — 50 vitest tests
+│   ├── src/app/              # Layout, page, globals.css (Tailwind dark theme)
+│   ├── src/components/       # Watchlist, charts, Heatmap, PositionsTable, TradeBar, ChatPanel
+│   ├── src/state/            # TerminalProvider — SSE subscription and derived portfolio state
+│   └── src/lib/              # api.ts, format.ts, types.ts, mockApi.ts
+├── backend/                  # FastAPI uv project (Python) — 627 pytest tests, 100% coverage of app/
+│   ├── app/market/           # Market data subsystem (193 tests — see MARKET_DATA_SUMMARY.md)
+│   ├── app/db/               # Schema DDL, lazy init, seed data, repository, trade transaction (230)
+│   ├── app/api/              # Routes, error envelope, valuation helper, deps (99)
+│   ├── app/llm/              # LiteLLM client, prompt, structured-output schema, mock mode (105)
+│   ├── app/config.py         # Settings + .env loading, read once at app construction
+│   ├── app/main.py           # create_app(), lifespan, static mount
+│   └── tests/                # pytest suite, mirroring app/ package-for-package
+├── planning/                 # Project-wide documentation for agents
+│   ├── PLAN.md               # This document
+│   ├── TEAM.md               # Agent ownership map and build order
+│   ├── TEAM_LOG.md           # Cross-boundary decisions and handoffs, append-only
+│   ├── MARKET_DATA_SUMMARY.md
+│   └── archive/              # Superseded design docs
 ├── scripts/
 │   ├── start_mac.sh          # Launch Docker container (macOS/Linux)
 │   ├── stop_mac.sh           # Stop Docker container (macOS/Linux)
 │   ├── start_windows.ps1     # Launch Docker container (Windows PowerShell)
 │   └── stop_windows.ps1      # Stop Docker container (Windows PowerShell)
-├── test/                     # Playwright E2E tests + docker-compose.test.yml
+├── test/                     # Playwright E2E — 34 tests, 7 specs, + docker-compose.test.yml
+│   ├── e2e/                  # 01-fresh-start … 07-sse-resilience, run in filename order
+│   └── fixtures/terminal.ts  # The single page object every spec drives the UI through
 ├── db/                       # Volume mount target (SQLite file lives here at runtime)
 │   └── .gitkeep              # Directory exists in repo; finally.db is gitignored
-├── Dockerfile                # Multi-stage build (Node → Python)
-├── docker-compose.yml        # Optional convenience wrapper
+├── .github/workflows/
+│   ├── ci.yml                # backend / frontend / e2e — see §12
+│   ├── claude.yml            # @claude mention handler
+│   └── claude-code-review.yml
+├── Dockerfile                # Multi-stage build (Node 20 → Python 3.12), non-root uid 10001
+├── docker-compose.yml        # Convenience wrapper — same image, container and volume as scripts/
+├── .dockerignore
 ├── .env                      # Environment variables (gitignored)
 ├── .env.example              # Committed template — mirrors §5, no real keys
-└── .gitignore             ✅
+└── .gitignore
 ```
 
 ### Key Boundaries
 
 - **`frontend/`** is a self-contained Next.js project. It knows nothing about Python. It talks to the backend via `/api/*` endpoints and `/api/stream/*` SSE endpoints. Internal structure is up to the Frontend Engineer agent.
 - **`backend/`** is a self-contained uv project with its own `pyproject.toml`. It owns all server logic including database initialization, schema, seed data, API routes, SSE streaming, market data, and LLM integration. Internal structure is up to the Backend/Market Data agents.
-- **`backend/db/`** contains schema SQL definitions and seed logic. The backend lazily initializes the database on first request — creating tables and seeding default data if the SQLite file doesn't exist or is empty.
+- **`backend/app/db/`** contains the schema DDL, seed logic, the repository layer and the transactional trade execution. (This section originally called it `backend/db/`; the code landed inside the `app` package, which is where an importable module belongs.) The backend initializes the database in the app lifespan — creating tables and seeding default data if the SQLite file doesn't exist or is empty.
 - **`db/`** at the top level is the runtime volume mount point. The SQLite file (`db/finally.db`) is created here by the backend and persists across container restarts via Docker volume.
 - **`planning/`** contains project-wide documentation, including this plan. All agents reference files here as the shared contract.
 - **`test/`** contains Playwright E2E tests and supporting infrastructure (e.g., `docker-compose.test.yml`). Unit tests live within `frontend/` and `backend/` respectively, following each framework's conventions.
@@ -464,6 +481,30 @@ When the user sends a chat message, the backend:
 7. Stores the message and executed actions in `chat_messages`
 8. Returns the complete JSON response to the frontend (no token-by-token streaming — Cerebras inference is fast enough that a loading indicator is sufficient)
 
+### `POST /api/chat` Response — five fields, always
+
+```json
+{"message": "Buying 2 shares of AAPL at the current market price.",
+ "actions": {"trades": [{"ticker": "AAPL", "side": "buy", "quantity": 2.0,
+                         "status": "executed", "price": 189.95, "total": 379.90}],
+             "watchlist_changes": []},
+ "watchlist": ["AAPL", "GOOGL", "MSFT", "…"],
+ "cash_balance": 9620.10,
+ "positions": [{"ticker": "AAPL", "quantity": 2.0, "avg_cost": 189.95}]}
+```
+
+`actions` uses the shape defined in §7, failures included. The `watchlist` /
+`cash_balance` / `positions` echoes are **not decoration**: the assistant can
+change the watchlist and the portfolio mid-turn, and the SSE stream carries no
+membership event, so without them the frontend has no signal that either changed
+(§8).
+
+**Only an empty message is rejected.** Every other failure — a provider outage, an
+unparseable model response, a trade that fails validation — comes back **200**
+with the explanation in `message` or in a failed `actions` entry. A chat panel that
+renders an error banner instead of a reply is a worse experience than one that says
+what went wrong, and §12's E2E suite asserts both degradation paths.
+
 ### Structured Output Schema
 
 The LLM is instructed to respond with JSON matching this schema:
@@ -530,7 +571,7 @@ The frontend is a single-page application with a dense, terminal-inspired layout
 ### Technical Notes
 
 - Use `EventSource` for SSE connection to `/api/stream/prices`
-- Canvas-based charting library preferred (Lightweight Charts or Recharts) for performance
+- **Recharts** is the charting library, and it is the only one. §13.3 S3 is the reasoning: the UI needs a sparkline, a detail chart, a line chart *and* a treemap, and Recharts covers all four — Lightweight Charts has no treemap, so picking it would have meant shipping two libraries. Do not add a second one.
 - Price flash effect: on receiving a new price, briefly apply a CSS class with background color transition, then remove it
 - All API calls go to the same origin (`/api/*`) — no CORS configuration needed
 - Tailwind CSS for styling with a custom dark theme
@@ -542,20 +583,27 @@ The frontend is a single-page application with a dense, terminal-inspired layout
 ### Multi-Stage Dockerfile
 
 ```
-Stage 1: Node 20 slim
-  - Copy frontend/
-  - npm install && npm run build (produces static export)
+Stage 1: node:20-slim
+  - COPY frontend/package.json + package-lock.json, then npm ci
+  - COPY frontend/, then npm run build  →  static export at /build/out
 
-Stage 2: Python 3.12 slim
-  - Install uv
-  - Copy backend/
-  - uv sync (install Python dependencies from lockfile)
-  - Copy frontend build output into a static/ directory
-  - Expose port 8000
-  - CMD: uvicorn serving FastAPI app
+Stage 2: python:3.12-slim
+  - pip install uv, then COPY pyproject.toml + uv.lock
+  - uv sync --locked --no-dev --no-install-project
+  - COPY backend/app → /app/app,  COPY --from=frontend /build/out → /app/static
+  - useradd uid 10001, chown /app, USER finally  (non-root)
+  - ENV FINALLY_DB_PATH=/app/db/finally.db  FINALLY_STATIC_DIR=/app/static
+  - EXPOSE 8000, HEALTHCHECK on /api/health via urllib
+  - CMD uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
 
-FastAPI serves the static frontend files and all API routes on port 8000.
+FastAPI serves the static frontend files and all API routes on port 8000. Layer order in both stages is *manifests, install, then source*, so editing a component or a route rebuilds only the last layer.
+
+Three details are load-bearing and should not be "tidied":
+
+- **`--locked`** fails the build if `uv.lock` is out of date with `pyproject.toml`. That is the failure you want when a dependency was added without relocking.
+- **`/app/db` is created and chowned before `USER finally`** so the named volume Docker mounts over it inherits that ownership on first use. Without it the volume lands root-owned and SQLite cannot create its journal.
+- **The healthcheck uses `urllib`, not `curl`** — python is already in the image, `curl` is not in `-slim`.
 
 ### Docker Volume
 
@@ -581,7 +629,11 @@ The `db/` directory in the project root maps to `/app/db` in the container. The 
 
 **`scripts/start_windows.ps1`** / **`scripts/stop_windows.ps1`**: PowerShell equivalents for Windows.
 
-All scripts should be idempotent — safe to run multiple times.
+All scripts are idempotent — safe to run multiple times.
+
+The scripts and `docker compose up` are **interchangeable**: the image tag (`finally:latest`), container name (`finally`) and volume name (`finally-data`) are pinned identically in both, so starting with one and stopping with the other works. `docker-compose.yml` declares the volume with an explicit `name:` for exactly this reason — without it Compose would prefix the project name and the two paths would keep separate databases. `env_file` there is the long form with `required: false`, so a fresh clone with no `.env` still starts (simulator prices, dead chat panel) rather than dying on a stat error.
+
+Both paths bind host port **8000**, so they collide with anything else already on it. To run alongside another service, publish a different host port: `docker run -d --name finally -p 8001:8000 -v finally-data:/app/db --env-file .env finally:latest`.
 
 ### Optional Cloud Deployment
 
@@ -591,6 +643,16 @@ The container is designed to deploy to AWS App Runner, Render, or any container 
 
 ## 12. Testing Strategy
 
+### What exists today
+
+| Suite | Where | Count | How to run |
+|---|---|---|---|
+| Backend unit | `backend/tests/` | **627**, 100% statement coverage of `app/` | `cd backend && uv sync --all-extras && uv run pytest` |
+| Frontend unit | `frontend/src/**/*.test.ts(x)` | **50** | `cd frontend && npm test` |
+| E2E | `test/e2e/` | **34** across 7 specs | see *Running the E2E suite* below |
+
+`uv sync` **without** `--all-extras` (or `--dev`) does not install pytest, and `uv run pytest` then fails with a bare "command not found" that looks like a broken checkout.
+
 ### Unit Tests (within `frontend/` and `backend/`)
 
 **Backend (pytest)**:
@@ -598,6 +660,8 @@ The container is designed to deploy to AWS App Runner, Render, or any container 
 - Portfolio: trade execution logic, P&L calculations, edge cases (selling more than owned, buying with insufficient cash, selling at a loss)
 - LLM: structured output parsing handles all valid schemas, graceful handling of malformed responses, trade validation within chat flow
 - API routes: correct status codes, response shapes, error handling
+
+The suite is **hermetic by construction**: an autouse fixture in `backend/tests/conftest.py` deletes `OPENROUTER_API_KEY`, `MASSIVE_API_KEY`, `LLM_MOCK`, `FINALLY_DB_PATH` and `FINALLY_STATIC_DIR` before every test. This is not tidiness — `load_dotenv()` (ours, or the one LiteLLM fires at import) copies the developer's real `.env` into `os.environ` for the rest of the session, so without it any assertion about an *absent* variable passes in CI and fails only for the person whose chat panel actually works.
 
 **Frontend (React Testing Library or similar)**:
 - Component rendering with mock data
@@ -608,24 +672,77 @@ The container is designed to deploy to AWS App Runner, Render, or any container 
 
 ### E2E Tests (in `test/`)
 
-**Infrastructure**: A separate `docker-compose.test.yml` in `test/` that spins up the app container plus a Playwright container. This keeps browser dependencies out of the production image.
+**Infrastructure**: `test/docker-compose.test.yml` spins up the **production image, unmodified**, plus a Playwright container. This keeps ~500MB of Chromium out of the artifact users download. Every spec drives the UI through one page object, `test/fixtures/terminal.ts`.
 
-**Environment**: Tests run with `LLM_MOCK=true` by default for speed and determinism.
+**Environment**: `LLM_MOCK=true`, an empty `MASSIVE_API_KEY` (so the in-process simulator ticks at ~500ms rather than waiting on a 15s poll), and a tmpfs over `/app/db` so every run starts from a freshly seeded database. Stated inline in the compose file rather than read from `.env`, because a developer's `.env` may carry a real key or `LLM_MOCK=false` — either turns the suite into a slow, non-deterministic, occasionally-charged mess whose failures look like application bugs.
 
-**Key Scenarios**:
-- Fresh start: default watchlist appears, $10k balance shown, prices are streaming
-- Add and remove a ticker from the watchlist
-- Buy shares: cash decreases, position appears, portfolio updates
-- Sell shares: cash increases, position updates or disappears
-- Portfolio visualization: heatmap renders with correct colors, P&L chart has data points
-- AI chat (mocked): send a message, receive a response, trade execution appears inline
-- SSE resilience: disconnect and verify reconnection
+**Running the E2E suite**:
+
+```bash
+# The documented path — production image + Playwright container
+docker compose -f test/docker-compose.test.yml up --build \
+  --abort-on-container-exit --exit-code-from playwright
+docker compose -f test/docker-compose.test.yml down -v
+
+# Against a server you started yourself (no Docker)
+E2E_BASE_URL=http://127.0.0.1:8010 npx playwright test    # from test/
+```
+
+**Two things that will silently break this harness if "simplified":**
+
+1. **The app service's dotted network alias, `app.finally.test`.** Chromium upgrades plain HTTP to a *single-label* hostname to HTTPS, so `http://app:8000` — the obvious compose service name — fails **every** navigation with `ERR_SSL_PROTOCOL_ERROR` while `curl` to the same URL returns 200. No `--disable-features` flag reaches that code path. Loopback is the one host Chromium exempts, which is why running the suite against `127.0.0.1` hides this completely.
+2. **`workers: 1`, `fullyParallel: false`, `retries: 0`.** The app is single-user by design — one cash balance, one watchlist, one position book — so two workers trade against each other's money. And specs mutate persistent state, so a retry re-runs a test whose first attempt already spent cash; a failure here should be read, not re-rolled.
+
+**Key Scenarios** — the spec files, in the order they run:
+
+| Spec | Covers |
+|---|---|
+| `01-fresh-start` | Seeded watchlist, $10,000 cash, prices streaming, net liquidation equals cash while flat, `/api/health` reports the simulator + mock LLM the suite assumes |
+| `02-watchlist` | Add / remove / stream a ticker; idempotent add and remove; a malformed symbol rejected with the backend's own message; removing the selected ticker moves the detail chart |
+| `03-trade-buy` | Cash debited, position opened, header repainted; button disabled until a price arrives; zero quantity disables both sides; a buy over the balance rejected with the server's message |
+| `04-trade-sell` | Partial sell credits cash and leaves `avg_cost` alone; a sell to zero **deletes** the row; overselling and selling an unheld symbol rejected |
+| `05-portfolio-viz` | Heatmap cell per position coloured by P&L; equity curve joins persisted snapshots to the live mark; positions table shows unrealized P&L and a session-based day %; net liquidation equals cash plus every position at the live price |
+| `06-chat` | Reply with no action; a trade auto-executed and shown inline as a chip; an unaffordable trade as a failed chip **verbatim**; a watchlist change reaching the panel; provider outage and unparseable response both degrading to prose, not an error |
+| `07-sse-resilience` | Live ticks; a stream that **ends mid-session** goes non-live, keeps its prices and reconnects unaided; a refused endpoint recovering; a reload rebuilding the sparkline series; one event carrying every tracked ticker |
+
+`context.setOffline(true)` is deliberately **not** used for the disconnect scenario. Measured against this app: Chromium's offline emulation refuses *new* requests but leaves an already-established socket alone — an open `/api/stream/prices` kept delivering events for the whole offline window while `fetch()` threw. An offline-based test asserts a transition the browser never makes and fails on a healthy app. A stream that ends is the real-world drop (redeploy, proxy timeout, container restart) and is reproducible.
+
+### CI
+
+`.github/workflows/ci.yml`, on every push and pull request. Three jobs, split by what each can prove:
+
+| Job | Runs |
+|---|---|
+| `backend` | `ruff check`, then pytest at a hard `--cov-fail-under=100` |
+| `frontend` | `tsc --noEmit`, vitest, and the real static export (asserting `out/index.html` exists) |
+| `e2e` | The compose harness above — the **only** job that proves the Dockerfile builds |
+
+No secrets are needed: the harness pins `LLM_MOCK=true`, so CI never calls a paid provider and never depends on one being up. The Playwright HTML report and traces upload as an artifact on failure.
+
+The e2e job runs on every push rather than being reserved for releases, because the container is the documented way a user starts this project — a broken image is a broken product no matter how green the unit tests are. That is not hypothetical: the single-label-hostname failure above made all 34 E2E tests fail in the container while every one of them passed on loopback.
 
 ---
 
 ## 13. Review Notes — Questions, Clarifications & Simplifications
 
-> Appended 2026-08-24 by a documentation review pass. This section is **feedback on the plan above, not additional specification**. Nothing here has been decided. Items marked **[DRIFT]** are places where the plan and the already-built market data code disagree — those are factual corrections and should be applied to the sections above. Items marked **[OPEN]** need a human decision before the relevant agent starts work.
+> Appended 2026-08-24 by a documentation review pass. **This section is now a historical record, not live specification.** Every `[DRIFT]` and `[OPEN]` item below was resolved in the body of this document before the corresponding code was written, so where §13 and the body disagree, **the body wins** — do not implement anything from §13 directly. It is kept because it records *why* several settled decisions are what they are.
+>
+> Resolutions, for the reader who arrives here first:
+>
+> - `session_open` / `change_percent_session` — §6 and the `PriceUpdate` contract
+> - SSE event shape and the `retry: 1000` directive — §6
+> - Grouped snapshot call and the poll budget — §6
+> - Watchlist validation, size cap and `supports_ticker()` — §6, §8
+> - Trade success and error contract, one shared error vocabulary — §8
+> - Sell semantics: `avg_cost` untouched, sell-to-zero deletes the row — §7
+> - `chat_messages.actions` shape, failures included — §7
+> - Watchlist membership refresh path (mutating endpoints and `/api/chat` return the full list) — §8
+> - `LLM_MOCK` keyword mapping — implemented in `app/llm/mock.py`, documented in `TEAM_LOG.md`
+> - Snapshot lifecycle: written on trade execution only, `?since=`/`?limit=` on history — §7, §8
+> - Static asset path pinned to `/app/static` — §11
+> - `.env.example` — created; `litellm` — added to `backend/pyproject.toml`
+>
+> Of the §13.3 simplifications: **S2** (snapshot on trades only), **S3** (Recharts alone), **S5** (two deliberate valuation sites) and **S6** (membership-only watchlist) were adopted. **S1** (derive positions from the trade log) and **S4** (drop the scripts for compose) were **not** — `positions` stays a real table, and the four scripts ship alongside `docker-compose.yml`. **S7** is a note, not a change.
 
 ### 13.1 Corrections — plan contradicts shipped code
 

@@ -978,3 +978,146 @@ Suite: **627 passing, 100% statement coverage of `app/`**, ruff clean. Both
 branches plus the mock-mode silence are covered in
 `tests/api/test_health.py::TestMissingKeyWarning` and
 `tests/api/test_config.py::TestLlmConfigured`.
+
+### integration-tester → devops-engineer, backend-api-engineer (2026-08-31)
+
+**The E2E suite was run for the first time, and the image was built for the first
+time. 34 tests, three defects found — all three in the suite, none in the app.**
+Two were found driving the app on loopback; the third was found only by the
+container harness, and could not have been found any other way.
+
+**1. `placeOrder` raced on a reused DOM notice** (`test/fixtures/terminal.ts`).
+The order bar's confirmation lingers five seconds and every confirmation matches
+the same shape, so `"Bought 4 AMZN at 185.02"` is a valid-looking confirmation of
+the *previous* order. Polling the DOM for a match resolved instantly against
+stale text, and a sell placed straight after a buy failed roughly one run in two.
+It now waits on `POST /api/portfolio/trade` — which cannot be stale — and takes
+the server's exact figures instead of the display's two decimals, then asserts
+the notice confirms *that* price. Suite wall-clock dropped from 1m12s to 39s as a
+side effect.
+
+**2. `07-sse-resilience` asserted a transition Chromium never makes.** The test
+called `context.setOffline(true)` and expected the connection dot to leave
+"Live". Measured: offline emulation refuses *new* requests but leaves an
+already-established socket alone — an open `/api/stream/prices` delivered 11 more
+events during the offline window while `fetch("/api/health")` threw. That test
+could not have passed against a healthy app, in a container or anywhere. It is
+replaced by a stream that is *fulfilled with one tick and then ended*, which is
+the real-world drop (redeploy, proxy timeout, container restart) and is
+deterministic: the price stays painted, the dot goes non-live, and `EventSource`
+reconnects on its own with no app involvement.
+
+**3. Chromium will not load plain HTTP from a single-label hostname**
+(`test/docker-compose.test.yml`, `test/playwright.config.ts`). The harness pointed
+the browser at `http://app:8000` — the compose service name — and *every one of
+the 34 navigations* died with `net::ERR_SSL_PROTOCOL_ERROR`, while `fetch
+("http://app:8000/api/health")` from the same container returned 200. Chromium
+silently upgrades a bare single-label host to HTTPS; the app answers HTTP, and the
+handshake fails. Measured, in the Playwright image:
+
+```
+FAIL http://app:8000/         net::ERR_SSL_PROTOCOL_ERROR
+OK   http://app.test:8000/    200
+OK   http://172.19.0.2:8000/  200
+```
+
+No `--disable-features` value reaches this path (`HttpsUpgrades`,
+`HttpsFirstBalancedMode` and `HttpsFirstBalancedModeAutoEnable` were all tried and
+all failed), so the fix is a **dotted network alias** — `app.finally.test`, a
+reserved RFC 6761 TLD — declared on the `app` service and used in
+`E2E_BASE_URL`. Loopback is the one host Chromium exempts, which is exactly why a
+suite that is only ever run against `127.0.0.1` reports green on a harness that
+cannot navigate at all. **This is the argument for the e2e CI job existing.**
+
+**Also fixed:** `tests/api/test_config.py`'s isolation fixture never deleted
+`OPENROUTER_API_KEY`, so `TestLlmConfigured` asserted "no key" against the
+developer's real one and failed on every machine where chat works. The delenv now
+lives in the root `tests/conftest.py` as an autouse fixture covering all five
+FinAlly variables, so the whole suite is hermetic: verified green with a hostile
+`OPENROUTER_API_KEY`/`MASSIVE_API_KEY`/`LLM_MOCK` exported.
+
+**CI now exists** (`.github/workflows/ci.yml`) — there was none, which is why the
+two suite defects and the config-test failure went unnoticed. Three jobs: backend
+(ruff + pytest at a hard `--cov-fail-under=100`), frontend (tsc + vitest + the
+real static export), and e2e (`docker compose -f test/docker-compose.test.yml up
+--build`, the only job that proves the Dockerfile builds). No secrets needed.
+
+**Correction to an earlier claim of mine:** the process holding port 8000 on this
+machine is not stale Docker cruft, it is an unrelated project's container
+(`prelegal-app-1`). It was stopped and restarted around this work and is running
+again. The E2E harness publishes no port and never collided with it; only the
+production `docker-compose.yml`, which binds 8000, would.
+
+**The container path is now verified, not inferred:**
+
+- `docker build` — succeeds; multi-stage Node → Python, static export at
+  `/app/static`, non-root uid 10001
+- `docker compose -f test/docker-compose.test.yml up --build
+  --abort-on-container-exit --exit-code-from playwright` — **34 passed**, twice
+  from a torn-down `-v` state, exit code 0
+- `scripts/start_mac.sh --no-open` — builds, runs, waits for health, reports
+  healthy; `/api/health` shows `static:true`, and `GET /` serves the console
+- `scripts/stop_mac.sh` — removes the container and keeps the `finally-data`
+  volume, as documented
+
+**And the real LLM path, which every other test deliberately mocks, works.**
+Against the live container with a real `OPENROUTER_API_KEY`: a portfolio question
+answered correctly from context, and "Buy 2 shares of AAPL for me now" produced
+`{"ticker":"AAPL","side":"buy","quantity":2.0,"status":"executed","price":189.95,
+"total":379.9}`, auto-executed, with cash and the position persisted. That leaves
+a 2-share AAPL position in the `finally-data` volume; `docker volume rm
+finally-data` resets it.
+
+Green: **34 E2E in the container (twice) plus four fresh-database loopback runs,
+627 backend at 100% coverage, 50 frontend.**
+
+### integration-tester → backend-api-engineer (2026-08-31, later)
+
+**A fourth defect, found while verifying the counts the documentation now quotes:
+two Massive tests fail intermittently, and the cause is a stale constant in the
+test file, not the poller.**
+
+`tests/market/test_massive.py` held `NOW_NS = int(time.time() * NS_PER_SEC)` at
+module level, while `test_converts_nanoseconds_not_milliseconds` and
+`test_timestamp_is_converted_from_nanoseconds` assert the converted timestamp lands
+**within 5 seconds of `time.time()`**. The constant is minted at collection; the
+assertions run once the suite reaches `tests/market/`, which is last
+alphabetically and roughly 6–8 seconds in. So the whole suite passes or fails on
+whether that run happened to cross the 5-second line:
+
+```
+run 1: 627 passed        run 3: 2 failed, 625 passed
+run 2: 627 passed        run 4: 627 passed
+```
+
+Read in isolation the failure looks like a nanosecond-conversion bug in
+`MassiveDataSource._safe_timestamp`, which is the one place in that module a real
+bug of this shape has actually lived before — so it is worse than a nuisance, it
+points at the wrong file. Replaced with a `now_ns()` helper evaluated at use time;
+a value that cannot be stale cannot drift. Eight consecutive full runs green,
+`ruff check` clean.
+
+**Note for whoever tunes CI:** this is the kind of failure that arrives as a
+one-in-four red build months from now, so it is worth knowing the shape — an
+assertion with a wall-clock tolerance compared against a value captured at import.
+There is no other instance of the pattern in the suite; I checked.
+
+**Documentation sync (same session).** `PLAN.md` §4 (tree, now describing what
+exists), §9 (the `/api/chat` response shape and the 200-degradation rule), §10
+(Recharts named as the only charting library), §11 (the Dockerfile as built, plus
+the three load-bearing details in it), §12 (rewritten: real suite counts, how to
+run each, the two things that silently break the E2E harness, the per-spec
+coverage table, and the CI section) and §13 (relabelled a historical record with an
+index of where each item was resolved). Also `README.md` (was still claiming
+everything but market data was unbuilt), root `CLAUDE.md`, `backend/README.md`,
+`backend/CLAUDE.md` (extended past market data to cover db/api/llm), `TEAM.md`, and
+the stale "status of the code today" banner in `MARKET_DATA_DESIGN.md`.
+
+One thing found while doing it, for `devops-engineer`: `planning/` and
+`planning/archive/` both hold `MARKET_DATA_DESIGN.md`, `MARKET_DATA_REVIEW.md`,
+`MARKET_INTERFACE.md`, `MARKET_SIMULATOR.md` and `MASSIVE_API.md`, and the two
+copies **differ** — the `planning/` versions are substantially longer. The root
+`CLAUDE.md` previously implied the archive held the fuller detail; it now says the
+opposite, which matches the files. Worth deciding whether the archive copies still
+earn their place, but I have not moved or deleted anything.
+

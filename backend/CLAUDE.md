@@ -4,8 +4,91 @@
 
 ```bash
 cd backend
-uv sync --extra dev   # Install all dependencies including test/lint tools
+uv sync --all-extras   # Install all dependencies including test/lint tools
 ```
+
+`uv sync` on its own installs the runtime dependencies only. `uv run pytest` then
+fails with a bare `Failed to spawn: pytest / No such file or directory`, which
+reads like a broken checkout rather than a missing extra.
+
+## The four subsystems
+
+`app/` is four packages plus two files, and each package re-exports its whole
+public surface from its `__init__.py` — import from `app.db`, never from
+`app.db.repository`, so the internal layout stays free to change.
+
+| Package | Owns | Tests |
+|---|---|---|
+| `app/market/` | Simulator, Massive client, price cache, SSE stream | 193 |
+| `app/db/` | Schema DDL, lazy init, seed, repository, transactional trades | 230 |
+| `app/api/` | Routes, error envelope, valuation helper, dependencies | 99 |
+| `app/llm/` | LiteLLM client, prompt, structured output, mock mode | 105 |
+
+`app/config.py` reads the environment once (`load_settings()`); `app/main.py`
+assembles the app (`create_app()`), owns the lifespan, and mounts the static
+export. 627 tests total, 100% statement coverage of `app/`, enforced in CI at
+`--cov-fail-under=100`.
+
+### `app/db` — persistence
+
+```python
+from app.db import Repository, get_database
+
+repo = Repository()          # process-wide Database
+await repo.initialize()      # lazy schema + seed; safe on every startup
+```
+
+`Repository` is the only way in. Reads: `get_portfolio`, `get_cash_balance`,
+`get_positions`, `get_position`, `get_trades`, `get_realized_pnl`,
+`get_portfolio_history`, `get_watchlist`, `get_chat_messages`. Writes:
+`execute_trade`, `record_snapshot`, `add_to_watchlist`, `remove_from_watchlist`,
+`add_chat_message`.
+
+- **`execute_trade` is one SQLite transaction** across `trades`, `positions`,
+  `users_profile.cash_balance` and `portfolio_snapshots`. Nothing partially
+  applies.
+- **A buy re-weights `avg_cost`; a sell never touches it.** A sell to within
+  `QUANTITY_EPSILON` (1e-9) of zero **deletes** the position row rather than
+  leaving `quantity = 0`.
+- **Realized P&L is derived, not stored** (`get_realized_pnl`), and appears only
+  in the LLM's portfolio context — never in the positions table, which is
+  unrealized only.
+- Failures raise typed `DatabaseError` subclasses (`InsufficientCashError`,
+  `InsufficientSharesError`, `InvalidQuantityError`, …) that carry the PLAN.md §8
+  code and user-facing message. Routes do not re-word them.
+
+### `app/api` — routes and the error envelope
+
+`register_error_handlers(app)` turns every `DatabaseError` and `APIError` into the
+single envelope `{"error": {"code": …, "message": …}}`. **There is one error
+vocabulary, not two** — the manual trade path and the LLM auto-execution path both
+surface these same strings, and the chat panel reuses `message` verbatim.
+
+`app/api/valuation.py` is the one server-side valuation helper (`value_position`,
+`value_portfolio`, `prices_from_cache`), shared by `/api/portfolio` and the chat
+context builder. The client recomputes the same numbers live between fetches and
+is authoritative for anything displayed — PLAN.md §13.3 S5.
+
+### `app/llm` — the chat turn
+
+```python
+from app.llm import run_chat_turn
+
+body = await run_chat_turn(message=..., repo=..., cache=..., source=...,
+                           llm_mock=settings.llm_mock)
+```
+
+`app/api/chat.py` is the only production caller. **Only an empty message is
+rejected**; a provider outage (`LLMUnavailableError`) or an unparseable reply
+(`LLMResponseError`) degrades to prose in a 200, because a chat panel showing an
+error banner is worse than one that says what went wrong. Trades the model asks
+for are auto-executed through the same validation as manual ones, and failures are
+recorded in `actions` with their code and message.
+
+`mock_completion()` maps keywords in the user's message to canned structured
+responses (`buy`, `sell`, `watch`/`add`, `unwatch`/`remove`, `yolo`/`all in` for a
+failed trade, `unavailable`, `malformed`). The E2E suite is pinned to that mapping
+— changing a keyword breaks `test/e2e/06-chat.spec.ts`.
 
 ## Market Data API
 
@@ -62,11 +145,22 @@ Default tickers: AAPL, GOOGL, MSFT, AMZN, TSLA, NVDA, META, JPM, V, NFLX. Seed p
 ## Running Tests
 
 ```bash
-uv run --extra dev pytest -v                       # All tests
-uv run --extra dev pytest --cov=app                # With coverage
-uv run --extra dev ruff check app/ tests/          # Lint
-uv run --extra dev ruff format app/ tests/         # Format
+uv run pytest                                      # All 627
+uv run pytest --cov=app --cov-report=term-missing  # 100% of app/ today
+uv run ruff check .                                # Lint (CI gate)
+uv run pytest tests/db -q                          # One subsystem
 ```
+
+`ruff format` is **not** a CI gate and 15 files do not currently satisfy it —
+running it will reformat unrelated code and bury your diff. `ruff check` is the
+gate.
+
+The suite is hermetic: an autouse fixture in `tests/conftest.py` deletes
+`OPENROUTER_API_KEY`, `MASSIVE_API_KEY`, `LLM_MOCK`, `FINALLY_DB_PATH` and
+`FINALLY_STATIC_DIR` before every test. Without it, `load_dotenv()` — ours, or the
+one LiteLLM fires at import — leaves the developer's real `.env` in `os.environ`
+for the rest of the session, so an assertion about an *absent* variable passes in
+CI and fails only for the person whose chat panel works.
 
 Pass `seed=` to `GBMSimulator` / `SimulatorDataSource` for reproducible price paths.
 
@@ -77,3 +171,19 @@ Massive fixtures must be built from the real SDK dataclasses (`LastTrade`, `Agg`
 ```bash
 uv run market_data_demo.py   # Live terminal dashboard with simulated prices
 ```
+
+## Running the server directly
+
+The image's defaults are absolute (`/app/db`, `/app/static`), so a local run needs
+both pointed somewhere real:
+
+```bash
+FINALLY_DB_PATH=../db/finally.db FINALLY_STATIC_DIR=../frontend/out \
+  uv run uvicorn app.main:app --port 8000
+```
+
+A missing static directory is not an error — `/api/*` works and `GET /` explains
+that no frontend build is present. `GET /api/health` reports what the process
+actually resolved: `market_source`, `requested_source`, `fallback`, `tickers`,
+`llm_configured` (key *presence* only — never the key, a prefix, or its length),
+`llm_mock` and `static`.

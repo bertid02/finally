@@ -11,11 +11,15 @@
 > `backend/app/market/`. Where this document and the shipped code disagree, this document is
 > the target — §14 lists every delta. `PLAN.md` §6 and §8 remain the product-level authority.
 >
-> **Status of the code today.** `backend/app/market/` exists and passes 73 tests, but three
-> things in it are wrong or missing and are load-bearing for the rest of the platform:
-> `session_open` (no data source for "daily change %"), `supports_ticker()` (no watchlist
-> validation), and a field-name bug in the Massive poller that silently skips *every* ticker
-> on *every* poll. All are addressed below.
+> **Status of the code today (updated 2026-08-31).** All of this is **built**.
+> `backend/app/market/` passes **193 tests** at 100% statement coverage, and the three
+> gaps this document was written to close are closed: `session_open` (the data source for
+> "daily change %"), `supports_ticker()` (watchlist validation), and the field-name bug in
+> the Massive poller that silently skipped *every* ticker on *every* poll. See
+> `MARKET_DATA_REVIEW.md` for the finding-by-finding record and `MARKET_DATA_SUMMARY.md`
+> for the shipped surface. This document is now a **design record**, not a work list — read
+> it to understand why the subsystem is shaped the way it is, and prefer the code and
+> `../backend/CLAUDE.md` as the authority on what it currently does.
 
 ---
 
