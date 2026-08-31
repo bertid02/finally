@@ -7,19 +7,31 @@ __pycache__/
 *.so
 
 # Distribution / packaging
+#
+# These come from GitHub's Python template, where the repository *is* the Python
+# project. Here it is one directory of several, and several of these names are
+# ordinary words that a JavaScript tree uses for source: an unanchored `lib/`
+# ignores every `lib` directory at every depth, which silently excluded all of
+# `frontend/src/lib/` -- the SSE client, the shared types, the formatters -- from
+# version control. The repository built fine for anyone who had those files on
+# disk and could not build at all for anyone who cloned it. So the generic names
+# are anchored to where a Python build artifact would actually appear.
 .Python
-build/
+/build/
+backend/build/
 develop-eggs/
-dist/
-downloads/
+/dist/
+backend/dist/
+/downloads/
 eggs/
 .eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
+/lib/
+/lib64/
+backend/lib/
+/parts/
+/sdist/
+/var/
+/wheels/
 share/python-wheels/
 *.egg-info/
 .installed.cfg
