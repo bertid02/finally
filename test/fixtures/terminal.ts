@@ -219,7 +219,7 @@ export class Terminal {
   }
 
   /**
-   * Place a market order and return the fill the notice reports.
+   * Place a market order and return the fill the server reports.
    *
    * The fill price is *not* knowable in advance: `POST /api/portfolio/trade`
    * carries no price and fills at the server's cached price at execution time,
@@ -227,18 +227,23 @@ export class Terminal {
    * this suite is derived from the value returned here, never from a price
    * scraped before the click.
    *
-   * The notice element is reused between orders and lingers for five seconds, so
-   * this waits for the text to *change* rather than merely to be present —
-   * otherwise a second order in quick succession reads the first order's fill.
+   * The fill is read from the trade response, not from the notice. The notice
+   * element is reused between orders and lingers for five seconds, and every
+   * notice matches the same shape — "Bought 4 AMZN at 185.02" is a perfectly
+   * valid confirmation of the *previous* order — so polling the DOM for a
+   * confirmation resolves instantly against stale text whenever a second order
+   * follows quickly. That raced: a sell placed straight after a buy read the
+   * buy's notice. Waiting on `POST /api/portfolio/trade` cannot be stale, and it
+   * carries the server's exact figures rather than the display's two decimals.
+   *
+   * The notice is still asserted afterwards, pinned to the price the server
+   * actually filled at, so a fill the UI fails to confirm is still a failure.
    */
   async placeOrder(
     ticker: string,
     quantity: number,
     side: "buy" | "sell",
   ): Promise<{ price: number; quantity: number; total: number }> {
-    const notice = this.orderNotice;
-    const stale = (await notice.count()) > 0 ? ((await notice.textContent()) ?? "") : "";
-
     await this.page.locator("#trade-ticker").fill(ticker);
     await this.page.locator("#trade-quantity").fill(String(quantity));
 
@@ -246,33 +251,41 @@ export class Terminal {
     // Both buttons stay disabled until a price for the symbol has arrived over
     // the stream — TradeBar.tsx guards on `Boolean(update)`.
     await expect(button).toBeEnabled();
+
+    const settled = this.page.waitForResponse(
+      (r) => r.url().includes("/api/portfolio/trade") && r.request().method() === "POST",
+    );
     await button.click();
-
-    const expected = new RegExp(
-      `^(Bought|Sold)\\s+[\\d.]+\\s+${ticker}\\s+at\\s+[\\d,]+\\.\\d{2}$`,
-    );
-    await expect
-      .poll(async () => ((await notice.count()) > 0 ? ((await notice.textContent()) ?? "") : ""), {
-        intervals: [100],
-      })
-      .toEqual(expect.stringMatching(expected));
-
-    const text = (await notice.textContent()) ?? "";
-    if (text === stale) {
-      throw new Error(`order notice never refreshed: ${JSON.stringify(text)}`);
+    const response = await settled;
+    const body = await response.json();
+    if (!response.ok()) {
+      throw new Error(
+        `order rejected: ${body?.error?.code ?? response.status()} ${body?.error?.message ?? ""}`.trim(),
+      );
     }
-    const match = text.match(
-      /^(Bought|Sold)\s+([\d.]+)\s+([A-Z]{1,5})\s+at\s+([\d,]+\.\d{2})$/,
-    );
-    if (!match) {
-      throw new Error(`order notice did not confirm a fill: ${JSON.stringify(text)}`);
+    const trade = body?.trade;
+    if (!trade) {
+      throw new Error(`trade response carried no fill: ${JSON.stringify(body)}`);
     }
-    expect(match[1]).toBe(side === "buy" ? "Bought" : "Sold");
-    expect(match[3]).toBe(ticker);
+    expect(trade.side).toBe(side);
+    expect(trade.ticker).toBe(ticker);
 
-    const price = parseFigure(match[4]);
-    const filled = Number(match[2]);
-    return { price, quantity: filled, total: price * filled };
+    // The UI must confirm the fill the server reported — same price, to the two
+    // decimals `format.ts` prints, so this cannot be satisfied by a lingering
+    // notice from an earlier order at a different price.
+    const shown = Number(trade.price).toLocaleString("en-US", {
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2,
+    });
+    await expect(this.orderNotice).toHaveText(
+      new RegExp(
+        `^${side === "buy" ? "Bought" : "Sold"}\\s+[\\d.,]+\\s+${ticker}\\s+at\\s+${shown.replace(".", "\\.")}$`,
+      ),
+    );
+
+    const price = Number(trade.price);
+    const filled = Number(trade.quantity);
+    return { price, quantity: filled, total: Number(trade.total ?? price * filled) };
   }
 
   // --- positions table ------------------------------------------------

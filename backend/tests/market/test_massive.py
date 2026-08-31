@@ -27,7 +27,18 @@ from app.market.massive_client import (
     resolve_session_change,
 )
 
-NOW_NS = int(time.time() * NS_PER_SEC)
+
+def now_ns() -> int:
+    """Nanoseconds, evaluated *now* -- never captured at import.
+
+    This was previously a module-level constant minted at collection time, and the
+    two tests that assert a converted timestamp lands within 5 seconds of
+    `time.time()` then failed whenever the full suite took longer than 5 seconds to
+    reach this file: the value was minted at collection, the assertion ran seven
+    seconds later, and the flake looked like a timestamp bug in the poller rather
+    than a stale constant in the test. A helper called at use time cannot drift.
+    """
+    return int(time.time() * NS_PER_SEC)
 
 
 def _snapshot(
@@ -43,7 +54,7 @@ def _snapshot(
     return TickerSnapshot(
         ticker=ticker,
         last_trade=(
-            LastTrade(ticker=ticker, price=last_trade_price, sip_timestamp=NOW_NS)
+            LastTrade(ticker=ticker, price=last_trade_price, sip_timestamp=now_ns())
             if last_trade_price is not None
             else None
         ),
@@ -52,7 +63,7 @@ def _snapshot(
         prev_day=Agg(close=prev_close) if prev_close is not None else None,
         todays_change=1.5,
         todays_change_percent=todays_change_percent,
-        updated=NOW_NS if updated is None else updated,
+        updated=now_ns() if updated is None else updated,
     )
 
 
@@ -123,16 +134,16 @@ class TestSafeTimestamp:
     def test_converts_nanoseconds_not_milliseconds(self):
         """sip_timestamp and `updated` are NANOseconds. Dividing by 1e3 lands
         roughly 31,000 years in the future."""
-        ts = MassiveDataSource._safe_timestamp(NOW_NS)
+        ts = MassiveDataSource._safe_timestamp(now_ns())
         assert abs(ts - time.time()) < 5
 
     def test_absurd_timestamp_degrades_to_now(self):
         """A wrong-by-a-millennium value must not poison the chart's x-axis."""
-        ts = MassiveDataSource._safe_timestamp(NOW_NS * 1000)
+        ts = MassiveDataSource._safe_timestamp(now_ns() * 1000)
         assert abs(ts - time.time()) < 5
 
     def test_stale_timestamp_degrades_to_now(self):
-        ts = MassiveDataSource._safe_timestamp(NOW_NS - 30 * 24 * 3600 * NS_PER_SEC)
+        ts = MassiveDataSource._safe_timestamp(now_ns() - 30 * 24 * 3600 * NS_PER_SEC)
         assert abs(ts - time.time()) < 5
 
     def test_zero_and_none_degrade_to_now(self):

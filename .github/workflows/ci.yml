@@ -1,0 +1,130 @@
+# FinAlly continuous integration.
+#
+# Three jobs, split by what they can prove:
+#
+#   backend   ruff + pytest, 100% statement coverage of app/ enforced
+#   frontend  tsc + vitest + the real static export build
+#   e2e       the production image, driven by Playwright through the compose harness
+#
+# The e2e job is the only one that proves the Dockerfile builds, so it runs on
+# every push rather than being reserved for releases -- the container is the
+# documented way a user starts this project, and a broken image is a broken
+# product no matter how green the unit tests are.
+#
+# Nothing here needs a secret. The suite pins LLM_MOCK=true and an empty
+# MASSIVE_API_KEY (test/docker-compose.test.yml), so CI never calls a paid
+# provider and never depends on one being up.
+
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    name: backend (ruff + pytest)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: backend/uv.lock
+
+      - name: Install dependencies
+        # --all-extras brings in the `dev` extra: without it pytest is not
+        # installed and `uv run pytest` fails with a bare "command not found".
+        run: uv sync --all-extras --frozen
+
+      - name: Lint
+        run: uv run ruff check .
+
+      - name: Test
+        # The coverage floor is the whole point of asserting it here: app/ is at
+        # 100% statement coverage today, and a silent drift downwards is exactly
+        # what nobody notices in a review.
+        run: uv run pytest -q --cov=app --cov-report=term-missing --cov-fail-under=100
+
+  frontend:
+    name: frontend (tsc + vitest + export)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - run: npm ci --no-audit --no-fund
+
+      - name: Typecheck
+        run: npx tsc --noEmit
+
+      - name: Unit tests
+        run: npm test
+
+      - name: Static export
+        # `output: "export"` means a build failure here is a container that
+        # serves nothing, so this is a deployment check, not a formality.
+        run: npm run build
+
+      - name: Confirm the export produced an entry point
+        run: test -f out/index.html
+
+  e2e:
+    name: e2e (production container + Playwright)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: test/package-lock.json
+
+      - name: Typecheck the suite
+        working-directory: test
+        run: |
+          npm ci --no-audit --no-fund
+          npx tsc --noEmit
+
+      - name: Run the suite against the image
+        # --exit-code-from makes Playwright's exit code the job's, and
+        # --abort-on-container-exit stops the app as soon as the run ends.
+        run: |
+          docker compose -f test/docker-compose.test.yml up --build \
+            --abort-on-container-exit --exit-code-from playwright
+
+      - name: Collect the report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: |
+            test/playwright-report
+            test/test-results
+          retention-days: 7
+          if-no-files-found: ignore
+
+      - name: Tear down
+        if: always()
+        run: docker compose -f test/docker-compose.test.yml down -v

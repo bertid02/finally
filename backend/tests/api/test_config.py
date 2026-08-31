@@ -18,8 +18,23 @@ from app.config import load_settings
 
 @pytest.fixture(autouse=True)
 def _isolate(monkeypatch):
-    """No inherited values, and no accidental read of the developer's real .env."""
-    for name in ("LLM_MOCK", "MASSIVE_API_KEY", "FINALLY_DB_PATH", "FINALLY_STATIC_DIR"):
+    """No inherited values, and no accidental read of the developer's real .env.
+
+    `OPENROUTER_API_KEY` belongs in this list as much as the rest, and for a
+    reason `find_dotenv` stubbing alone does not cover: an earlier
+    `load_dotenv()` -- ours, or the one LiteLLM fires at import -- has already
+    copied the developer's real `.env` into `os.environ`, where it outlives any
+    stub. Without the delenv, `TestLlmConfigured` asserts False against a real
+    key and fails on any machine that has one, which is every machine where chat
+    works.
+    """
+    for name in (
+        "LLM_MOCK",
+        "MASSIVE_API_KEY",
+        "FINALLY_DB_PATH",
+        "FINALLY_STATIC_DIR",
+        "OPENROUTER_API_KEY",
+    ):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setattr("app.config.find_dotenv", lambda *a, **kw: "")
 

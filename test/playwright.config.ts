@@ -47,8 +47,11 @@ export default defineConfig({
   reporter: [["list"], ["html", { open: "never", outputFolder: "playwright-report" }]],
 
   use: {
-    // In the compose harness this is http://app:8000. Set it to
-    // http://localhost:8000 to drive a container you started yourself.
+    // In the compose harness this is http://app.finally.test:8000 -- a dotted
+    // alias, because Chromium upgrades plain HTTP to a *single-label* host like
+    // `app` to HTTPS and fails the navigation (see docker-compose.test.yml). Set
+    // it to http://localhost:8000 to drive a container you started yourself;
+    // loopback is exempt from that upgrade.
     baseURL: process.env.E2E_BASE_URL ?? "http://localhost:8000",
     viewport: { width: 1600, height: 1000 },
     trace: "retain-on-failure",

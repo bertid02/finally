@@ -59,6 +59,19 @@ services:
       # Dockerfile.
       FINALLY_DB_PATH: /app/db/finally.db
       FINALLY_STATIC_DIR: /app/static
+    networks:
+      default:
+        # A *dotted* alias, and it is not cosmetic. Chromium refuses plain HTTP to
+        # a single-label hostname: it upgrades `http://app:8000` to HTTPS, the app
+        # answers HTTP, and every navigation dies with ERR_SSL_PROTOCOL_ERROR --
+        # while `curl http://app:8000` from the same container returns 200. The
+        # same browser loads `http://app.finally.test:8000` and the container's
+        # bare IP without complaint, and no `--disable-features` flag reaches this
+        # code path. `.test` is reserved by RFC 6761, so it can never collide with
+        # a real name. Driving the app on 127.0.0.1 never sees this, because
+        # loopback is the one host Chromium exempts.
+        aliases:
+          - app.finally.test
     tmpfs:
       # mode=1777 because the image runs as uid 10001 and a default-mode tmpfs
       # would land root-owned, leaving SQLite unable to create its journal.
@@ -85,7 +98,8 @@ services:
       app:
         condition: service_healthy
     environment:
-      E2E_BASE_URL: http://app:8000
+      # The dotted alias declared on `app` above, not the bare service name.
+      E2E_BASE_URL: http://app.finally.test:8000
       CI: "true"
       # The browsers are pre-installed in the image; keep npm from downloading a
       # second copy into the bind mount.

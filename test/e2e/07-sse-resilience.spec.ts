@@ -29,34 +29,65 @@ test.describe("price stream resilience", () => {
     await terminal.waitForTick("MSFT");
   });
 
-  test("drops to a non-live state when the network goes away, then recovers", async ({
+  test("a stream that ends mid-session goes non-live, keeps its prices, and reconnects", async ({
     page,
-    context,
   }) => {
+    // `context.setOffline(true)` is deliberately not used here, and the reason is
+    // worth recording: Chromium's offline emulation refuses *new* requests but
+    // leaves an already-established socket alone. Measured against this app, an
+    // open `/api/stream/prices` kept delivering events for the whole offline
+    // window while `fetch("/api/health")` threw — so an offline-based version of
+    // this test asserts a transition the browser never makes, and fails on a
+    // healthy app. A stream that ends is the real-world drop (a redeploy, a proxy
+    // timeout, a container restart) and it is reproducible.
     const terminal = new Terminal(page);
-    await terminal.open();
-    await expect(terminal.connectionStatus).toHaveText("Live");
 
-    // Kill the network under the open stream. `EventSource.onerror` fires with
-    // readyState CONNECTING, which `api.ts` maps to "reconnecting"; a closed
-    // socket would map to "disconnected". Either is a correct answer to "the
-    // network went away", so the assertion accepts both rather than pinning the
-    // browser's internal choice.
-    await context.setOffline(true);
-    await expect(terminal.connectionStatus).toHaveText(/^(Reconnecting|Offline)$/, {
-      timeout: 30_000,
-    });
+    // One tick, then end the body. `EventSource` sees the close, fires onerror
+    // with readyState CONNECTING, and schedules the retry the `retry: 1000`
+    // directive asks for.
+    const price = 187.65;
+    const oneTickThenClose = async (route: Route) =>
+      route.fulfill({
+        status: 200,
+        contentType: "text/event-stream",
+        headers: { "cache-control": "no-cache" },
+        body:
+          "retry: 1000\n\n" +
+          `data: ${JSON.stringify({
+            AAPL: {
+              ticker: "AAPL",
+              price,
+              previous_price: price,
+              session_open: 190,
+              timestamp: Date.now() / 1000,
+              change: 0,
+              change_percent: 0,
+              change_session: price - 190,
+              change_percent_session: -1.2368,
+              direction: "flat",
+            },
+          })}\n\n`,
+      });
+    await page.route("**/api/stream/prices", oneTickThenClose);
 
-    // The last known prices stay on screen — a dropped stream must not blank the
-    // console.
-    await expect(terminal.price("AAPL")).toHaveText(/^[\d,]+\.\d{2}$/);
+    await page.goto("/");
+    // The tick landed and was painted.
+    await expect(terminal.price("AAPL")).toHaveText(price.toFixed(2));
+    // Then the stream ended: the dot follows readyState, nothing else.
+    await expect(terminal.connectionStatus).toHaveText(/^(Reconnecting|Offline)$/);
+    // And the last known price is still on screen — a dropped stream must not
+    // blank the console.
+    await expect(terminal.price("AAPL")).toHaveText(price.toFixed(2));
 
-    // Restore it. Nothing in the app calls reconnect: EventSource retries on its
-    // own after the server's `retry: 1000`.
-    await context.setOffline(false);
+    // Let the retries through. Nothing in the app calls reconnect.
+    await page.unroute("**/api/stream/prices", oneTickThenClose);
     await expect(terminal.connectionStatus).toHaveText("Live", { timeout: 30_000 });
 
-    // And it is a live stream again, not just a green dot.
+    // A live stream again, not just a green dot: the real server's price for
+    // AAPL replaces the injected one.
+    await expect
+      .poll(() => terminal.priceValue("AAPL"), { timeout: 15_000 })
+      .not.toBeCloseTo(price, 2);
     await terminal.waitForTick("AAPL");
   });
 
