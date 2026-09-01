@@ -22,7 +22,11 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.staticfiles import StaticFiles
 from starlette.types import Scope
 
-from app.api import chat_router, health_router, portfolio_router, watchlist_router
+from app.api import health_router, portfolio_router, watchlist_router
+
+# The chat router comes from its own module, not from `app.api`: re-exporting it
+# there would re-introduce the import cycle that package's docstring describes.
+from app.api.chat import router as chat_router
 from app.api.errors import register_error_handlers
 from app.config import Settings, load_settings
 from app.db import Database, Repository, set_database
